@@ -1,0 +1,73 @@
+name: Project self-test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+          python -m pip install --requirement requirements.txt
+
+      - name: Validate YAML and Python syntax
+        run: |
+          set -euo pipefail
+          python -m py_compile scripts/*.py
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          for path in [*Path(".github/workflows").glob("*.yml"), *Path("config").glob("*.yml")]:
+              with path.open(encoding="utf-8") as stream:
+                  yaml.safe_load(stream)
+              print(f"YAML OK: {path}")
+          PY
+
+      - name: Run ShellCheck
+        run: shellcheck -x scripts/build-image.sh files/etc/uci-defaults/99-install-thirdparty
+
+      - name: Exercise Analyze and Resolve with fixtures
+        run: |
+          set -euo pipefail
+          python scripts/parse-owut-report.py \
+            --report reports/current-system.txt.example \
+            --installed reports/installed-packages.txt.example \
+            --top-level reports/top-level-packages.txt.example
+          python scripts/resolve-packages.py \
+            --include-openclash true \
+            --include-nikki true \
+            --include-lucky true
+          grep -q '^bandix' generated/packages-missing.txt
+          grep -q '^openclash:luci-app-openclash$' generated/packages-thirdparty.txt
+
+      - name: Validate official 25.12.2 package indexes
+        run: python scripts/validate-manifest.py --version 25.12.2 --online
+
+      - name: Confirm strict mode rejects unresolved packages
+        run: |
+          set -euo pipefail
+          if python scripts/validate-manifest.py --version 25.12.2 --strict; then
+            echo "strict mode unexpectedly accepted the unresolved Bandix fixture" >&2
+            exit 1
+          fi
+          echo "strict mode correctly rejected the unresolved fixture"
