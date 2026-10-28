@@ -1,0 +1,124 @@
+replacements:
+  opkg: apk-openssl
+
+ignore:
+  - libatomic
+  - libatomic1
+  - libpthread
+  - librt
+  - libstdcpp
+  - libstdcpp6
+
+ignore_prefixes:
+  - lib
+
+never_downgrade:
+  - luci-app-openclash
+
+always_keep:
+  - luci
+  - luci-base
+  - luci-compat
+  - luci-i18n-base-zh-cn
+  - curl
+  - bash
+  - ca-bundle
+  - dnsmasq-full
+
+remove_if_present:
+  - dnsmasq
+
+thirdparty:
+  luci-app-openclash:
+    provider: openclash
+  nikki:
+    provider: nikki
+  luci-app-nikki:
+    provider: nikki
+  luci-i18n-nikki-zh-cn:
+    provider: nikki
+  lucky:
+    provider: lucky
+  luci-app-lucky:
+    provider: lucky
+  luci-i18n-lucky-zh-cn:
+    provider: lucky
+
+# Kernel packages are only retained if they match this explicit functional/hardware list.
+# Add the exact NIC driver used by your router here if it is not already covered.
+kernel_keep_patterns:
+  - ^kmod-(tun|veth|br-netfilter|nft-tproxy|nft-socket)$
+  - ^kmod-fs-(ext4|exfat|vfat|ntfs3|btrfs)$
+  - ^kmod-usb-(core|storage|storage-extras|storage-uas)$
+  - ^kmod-(e1000|e1000e|igb|igbvf|igc|i40e|ixgbe|ixgbevf|r8101|r8125|r8126|r8168|r8169|tg3|bnx2|forcedeth|vmxnet3|amazon-ena|amd-xgbe)$
+
+# A feature group is enabled only when at least one trigger is present in the old system.
+feature_groups:
+  docker:
+    when_any:
+      - docker
+      - dockerd
+      - docker-compose
+      - luci-app-dockerman
+    add:
+      - docker
+      - dockerd
+      - containerd
+      - runc
+      - tini
+      - docker-compose
+      - luci-app-dockerman
+      - luci-i18n-dockerman-zh-cn
+      - kmod-veth
+      - kmod-br-netfilter
+  adguardhome:
+    when_any:
+      - adguardhome
+    add:
+      - adguardhome
+  storage:
+    when_any:
+      - block-mount
+      - e2fsprogs
+      - fdisk
+      - lsblk
+      - parted
+      - partx-utils
+      - kmod-fs-ext4
+      - kmod-fs-exfat
+      - kmod-fs-vfat
+      - kmod-fs-ntfs3
+      - kmod-fs-btrfs
+      - exfat-fsck
+      - exfat-mkfs
+      - btrfs-progs
+      - smartmontools
+      - lm-sensors
+    preserve_present:
+      - block-mount
+      - e2fsprogs
+      - fdisk
+      - lsblk
+      - parted
+      - partx-utils
+      - kmod-fs-ext4
+      - kmod-fs-exfat
+      - kmod-fs-vfat
+      - kmod-fs-ntfs3
+      - kmod-fs-btrfs
+      - exfat-fsck
+      - exfat-mkfs
+      - btrfs-progs
+      - smartmontools
+      - lm-sensors
+  usb_storage:
+    when_any:
+      - kmod-usb-storage
+      - kmod-usb-storage-extras
+      - kmod-usb-storage-uas
+    add:
+      - kmod-usb-core
+      - kmod-usb-storage
+      - kmod-usb-storage-extras
+      - kmod-usb-storage-uas
+

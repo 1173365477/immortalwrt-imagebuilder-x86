@@ -1,0 +1,47 @@
+# Example only. Replace reports/current-system.txt with the complete output of:
+# owut check --verbose --version-to 25.12 > current-system.txt 2>&1
+
+ASU-Server     https://sysupgrade.immortalwrt.org
+Upstream       https://downloads.immortalwrt.org
+Target         x86/64
+Profile        generic
+Package-arch   x86_64
+Root-FS-type   ext4
+Image-type     combined-efi
+Version-from   24.10.4 r00000-example (kernel 6.6.0)
+Version-to     25.12.2 r00000-example (kernel 6.12.103)
+
+Installed      437 packages
+Top-level      185 packages
+Default         95 packages
+User-installed 125 packages (top-level only)
+
+Installed packages (example subset):
+  adguardhome bandix bash block-mount containerd curl docker dockerd
+  kmod-fs-btrfs kmod-fs-ext4 kmod-igc kmod-tun kmod-usb-storage-uas
+  luci luci-app-dockerman luci-app-lucky luci-app-nikki
+  luci-app-openclash lucky nikki opkg smartmontools
+
+Top-level packages (example subset):
+  adguardhome bandix bash block-mount docker docker-compose
+  kmod-igc kmod-usb-storage-uas luci-app-dockerman luci-app-lucky
+  luci-app-nikki luci-app-openclash smartmontools
+
+User-installed packages (example subset):
+  adguardhome bandix docker docker-compose luci-app-dockerman
+  luci-app-lucky luci-app-nikki luci-app-openclash
+
+Package version changes:
+  docker                         27.3.1-r1             29.6.1-r1             (upgrade)
+  containerd                     1.7.24-r1             2.2.0-r1              (upgrade)
+  bandix                         0.12.5-r1                                    missing to-version
+  luci-app-openclash             0.48.002              0.47.156               (downgrade)
+
+Automatic package replacements/removals:
+  Package                       Replaced-by
+  opkg                          apk-openssl
+Details at https://downloads.immortalwrt.org/example-overview.json
+
+WARNING: example warning from owut
+ERROR: example build check error retained for migration review
+

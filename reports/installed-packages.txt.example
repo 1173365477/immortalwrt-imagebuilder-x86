@@ -1,0 +1,12 @@
+# Output format from: opkg list-installed > installed-packages.txt
+adguardhome - 0.107.59-r1
+bandix - 0.12.5-r1
+bash - 5.2.37-r1
+containerd - 1.7.24-r1
+curl - 8.12.1-r1
+docker - 27.3.1-r1
+dockerd - 27.3.1-r1
+kmod-igc - 6.6.93-r1
+luci-app-openclash - 0.48.002
+opkg - 2024.10.16-r1
+

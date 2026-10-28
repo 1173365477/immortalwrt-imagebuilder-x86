@@ -1,0 +1,157 @@
+name: Build ImmortalWrt x86_64 firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      immortalwrt_version:
+        description: ImmortalWrt release (25.12.x only)
+        required: true
+        default: 25.12.2
+        type: string
+      report_path:
+        description: Path to complete owut check output
+        required: true
+        default: reports/current-system.txt
+        type: string
+      include_openclash:
+        description: Include official OpenClash release APK
+        required: true
+        default: true
+        type: boolean
+      openclash_version:
+        description: OpenClash release version
+        required: true
+        default: 0.48.002
+        type: string
+      include_nikki:
+        description: Include Nikki 25.12 x86_64 release APKs
+        required: true
+        default: true
+        type: boolean
+      include_lucky:
+        description: Include Lucky 25.12 x86_64 release APKs
+        required: true
+        default: true
+        type: boolean
+      rootfs_size:
+        description: Root filesystem partition size in MiB
+        required: true
+        default: "8192"
+        type: string
+      create_release:
+        description: Publish the result as a GitHub Release
+        required: true
+        default: false
+        type: boolean
+      strict_mode:
+        description: Stop when any unresolved missing package remains
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  analyze-resolve-validate-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes jq zstd
+          python -m pip install --requirement requirements.txt
+
+      - name: Analyze
+        env:
+          REPORT_PATH: ${{ inputs.report_path }}
+        run: |
+          set -euo pipefail
+          [[ "$REPORT_PATH" != /* && "$REPORT_PATH" != *..* ]] || { echo "Unsafe report_path"; exit 2; }
+          [[ -f "$REPORT_PATH" ]] || { echo "Missing report: $REPORT_PATH"; exit 2; }
+          args=(--report "$REPORT_PATH" --output generated/system-analysis.json)
+          [[ -f reports/installed-packages.txt ]] && args+=(--installed reports/installed-packages.txt)
+          [[ -f reports/top-level-packages.txt ]] && args+=(--top-level reports/top-level-packages.txt)
+          python scripts/parse-owut-report.py "${args[@]}"
+
+      - name: Resolve
+        env:
+          INCLUDE_OPENCLASH: ${{ inputs.include_openclash }}
+          INCLUDE_NIKKI: ${{ inputs.include_nikki }}
+          INCLUDE_LUCKY: ${{ inputs.include_lucky }}
+        run: |
+          set -euo pipefail
+          python scripts/resolve-packages.py \
+            --include-openclash "$INCLUDE_OPENCLASH" \
+            --include-nikki "$INCLUDE_NIKKI" \
+            --include-lucky "$INCLUDE_LUCKY"
+
+      - name: Validate
+        env:
+          VERSION: ${{ inputs.immortalwrt_version }}
+          STRICT_MODE: ${{ inputs.strict_mode }}
+        run: |
+          set -euo pipefail
+          args=(--version "$VERSION" --online)
+          [[ "$STRICT_MODE" == "true" ]] && args+=(--strict)
+          if ! python scripts/validate-manifest.py "${args[@]}"; then
+            echo "::error::Manifest validation failed. Read generated/migration-report.md in the artifact."
+            exit 1
+          fi
+          if [[ "$STRICT_MODE" != "true" && -s generated/packages-missing.txt ]]; then
+            echo "::warning title=MIGRATION WARNING::Building with unresolved packages; review migration-report.md before use."
+          fi
+
+      - name: Fetch and verify third-party APKs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          OPENCLASH_VERSION: ${{ inputs.openclash_version }}
+        run: |
+          set -euo pipefail
+          python scripts/fetch-thirdparty.py --openclash-version "$OPENCLASH_VERSION"
+
+      - name: Build
+        env:
+          IMMORTALWRT_VERSION: ${{ inputs.immortalwrt_version }}
+          ROOTFS_SIZE: ${{ inputs.rootfs_size }}
+          PROFILE: generic
+        run: scripts/build-image.sh
+
+      - name: Upload firmware and migration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-${{ inputs.immortalwrt_version }}-x86-64-generic
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            generated/firmware/
+            generated/packages-official.txt
+            generated/packages-thirdparty.txt
+            generated/packages-missing.txt
+            generated/packages-skipped.txt
+            generated/packages-replaced.txt
+
+      - name: Create GitHub Release
+        if: ${{ success() && inputs.create_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.immortalwrt_version }}
+        run: |
+          set -euo pipefail
+          tag="firmware-${VERSION}-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" generated/firmware/* \
+            --title "ImmortalWrt ${VERSION} x86_64 build ${GITHUB_RUN_NUMBER}" \
+            --notes-file generated/migration-report.md
+

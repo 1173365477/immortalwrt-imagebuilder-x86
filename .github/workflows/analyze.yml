@@ -1,0 +1,99 @@
+name: Analyze migration report
+
+on:
+  workflow_dispatch:
+    inputs:
+      report_path:
+        description: Path to the complete owut check output
+        required: true
+        default: reports/current-system.txt
+        type: string
+      installed_packages_path:
+        description: Optional opkg list-installed or status export
+        required: false
+        default: reports/installed-packages.txt
+        type: string
+      top_level_packages_path:
+        description: Optional owut list --format fs-user export
+        required: false
+        default: reports/top-level-packages.txt
+        type: string
+      strict_mode:
+        description: Fail if unresolved packages remain
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install parser dependency
+        run: python -m pip install --requirement requirements.txt
+
+      - name: Analyze owut report
+        env:
+          REPORT_PATH: ${{ inputs.report_path }}
+          INSTALLED_PATH: ${{ inputs.installed_packages_path }}
+          TOP_LEVEL_PATH: ${{ inputs.top_level_packages_path }}
+        run: |
+          set -euo pipefail
+          [[ "$REPORT_PATH" != /* && "$REPORT_PATH" != *..* ]] || { echo "Unsafe report_path"; exit 2; }
+          [[ -f "$REPORT_PATH" ]] || { echo "Missing report: $REPORT_PATH"; exit 2; }
+          args=(--report "$REPORT_PATH" --output generated/system-analysis.json)
+          if [[ -n "$INSTALLED_PATH" && -f "$INSTALLED_PATH" ]]; then
+            args+=(--installed "$INSTALLED_PATH")
+          fi
+          if [[ -n "$TOP_LEVEL_PATH" && -f "$TOP_LEVEL_PATH" ]]; then
+            args+=(--top-level "$TOP_LEVEL_PATH")
+          fi
+          python scripts/parse-owut-report.py "${args[@]}"
+
+      - name: Resolve packages
+        run: python scripts/resolve-packages.py
+
+      - name: Validate manifest
+        env:
+          STRICT_MODE: ${{ inputs.strict_mode }}
+        run: |
+          set -euo pipefail
+          args=(--version 25.12.2)
+          [[ "$STRICT_MODE" == "true" ]] && args+=(--strict)
+          python scripts/validate-manifest.py "${args[@]}"
+
+      - name: Print analysis summary
+        if: always()
+        run: |
+          for file in generated/packages-official.txt generated/packages-thirdparty.txt generated/packages-missing.txt generated/packages-skipped.txt generated/packages-replaced.txt; do
+            echo "===== $file ====="
+            [[ -f "$file" ]] && cat "$file" || true
+          done
+
+      - name: Upload migration analysis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-analysis
+          if-no-files-found: error
+          path: |
+            generated/system-analysis.json
+            generated/packages-official.txt
+            generated/packages-thirdparty.txt
+            generated/packages-missing.txt
+            generated/packages-skipped.txt
+            generated/packages-replaced.txt
+            generated/migration-report.md
+            generated/final-packages.txt
+

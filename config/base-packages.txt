@@ -1,0 +1,18 @@
+# Deliberately small baseline. Everything else comes from the migration report.
+luci
+luci-base
+luci-compat
+luci-i18n-base-zh-cn
+curl
+bash
+ca-bundle
+unzip
+-dnsmasq
+dnsmasq-full
+ip-full
+ipset
+firewall4
+kmod-tun
+kmod-nft-tproxy
+kmod-nft-socket
+

@@ -1,0 +1,28 @@
+# Generated reports and downloaded/build output
+generated/*
+!generated/.gitkeep
+work/
+outputs/
+__pycache__/
+*.py[cod]
+.DS_Store
+*.img
+*.img.gz
+*.qcow2
+*.vdi
+*.vhdx
+*.vmdk
+
+# Never commit private migration reports or secrets
+reports/private-*
+files/etc/openclash/
+files/opt/docker/
+*.secret
+*.token
+*.key
+id_rsa*
+id_ed25519*
+
+# Third-party APKs are fetched during Actions
+files/root/thirdparty/
+

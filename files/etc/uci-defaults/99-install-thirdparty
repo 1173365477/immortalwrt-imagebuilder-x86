@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+apk_dir="/root/thirdparty"
+[ -d "$apk_dir" ] || exit 0
+
+set -- "$apk_dir"/*.apk
+[ -e "$1" ] || exit 0
+
+logger -t thirdparty-bootstrap "installing bundled third-party APKs"
+if ! apk add --allow-untrusted "$@"; then
+  logger -t thirdparty-bootstrap "APK installation failed; files and this uci-defaults script are retained"
+  exit 1
+fi
+
+rm -rf "$apk_dir"
+logger -t thirdparty-bootstrap "third-party APK installation completed"
+exit 0
+

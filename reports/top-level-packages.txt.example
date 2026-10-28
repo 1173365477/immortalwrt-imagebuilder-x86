@@ -1,0 +1,5 @@
+# Preferred command:
+# owut list --format fs-user > top-level-packages.txt
+adguardhome bash block-mount docker docker-compose kmod-igc
+kmod-usb-storage-uas luci-app-dockerman luci-app-lucky
+luci-app-nikki luci-app-openclash smartmontools

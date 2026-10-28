@@ -1,0 +1,63 @@
+providers:
+  openclash:
+    enabled: true
+    repository: vernesong/OpenClash
+    release: tag
+    tag_template: v{openclash_version}
+    asset_patterns:
+      - ^luci-app-openclash-{openclash_version}\.apk$
+    require_digest: true
+    packages:
+      - luci-app-openclash
+    official_dependencies:
+      - bash
+      - ca-bundle
+      - curl
+      - dnsmasq-full
+      - ip-full
+      - kmod-tun
+      - kmod-nft-tproxy
+      - luci-compat
+      - ruby
+      - ruby-yaml
+      - unzip
+
+  nikki:
+    enabled: true
+    repository: nikkinikki-org/OpenWrt-nikki
+    release: latest
+    asset_patterns:
+      - ^nikki_x86_64-openwrt-25\.12\.tar\.gz$
+    require_digest: true
+    packages:
+      - mihomo-meta
+      - nikki
+      - luci-app-nikki
+      - luci-i18n-nikki-zh-cn
+    archive_member_patterns:
+      - ^mihomo-meta-[^/]+\.apk$
+      - ^nikki-[^/]+\.apk$
+      - ^luci-app-nikki-[^/]+\.apk$
+      - ^luci-i18n-nikki-zh-cn-[^/]+\.apk$
+    official_dependencies: []
+
+  lucky:
+    enabled: true
+    repository: leesonaa/build_luci-app-lucky
+    release: latest
+    compatibility_body_regex: ImmortalWrt 25\.12
+    asset_patterns:
+      - ^lucky-[^/]+_x86_64\.apk$
+      - ^luci-app-lucky-[^/]+_x86_64\.apk$
+      - ^luci-i18n-lucky-zh-cn-[^/]+_x86_64\.apk$
+    require_digest: true
+    packages:
+      - lucky
+      - luci-app-lucky
+      - luci-i18n-lucky-zh-cn
+    official_dependencies: []
+
+# Optional provider hook example. Copy this shape, enable it, add package-to-provider
+# mappings in package-rules.yml, and provide exact compatibility/asset regexes.
+optional_providers: {}
+
