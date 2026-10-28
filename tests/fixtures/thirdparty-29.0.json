@@ -1,0 +1,12 @@
+{
+  "_fixture": "synthetic provider response; not an actual upstream release",
+  "tag_name": "v99.0.0-synthetic",
+  "body": "Only ImmortalWrt 25.12 is declared compatible.",
+  "assets": [
+    {
+      "name": "nikki_x86_64-openwrt-25.12.tar.gz",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "browser_download_url": "https://example.invalid/synthetic.tar.gz"
+    }
+  ]
+}

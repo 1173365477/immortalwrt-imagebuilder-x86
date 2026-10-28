@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       immortalwrt_version:
-        description: ImmortalWrt release (25.12.x only)
+        description: Exact ImmortalWrt release; official metadata must expose the required x86/64 capabilities
         required: true
         default: 25.12.2
         type: string
@@ -24,12 +24,12 @@ on:
         default: 0.48.002
         type: string
       include_nikki:
-        description: Include Nikki 25.12 x86_64 release APKs
+        description: Include Nikki only when its release declares target-series x86_64 APK compatibility
         required: true
         default: true
         type: boolean
       include_lucky:
-        description: Include Lucky 25.12 x86_64 release APKs
+        description: Include Lucky only when its release declares target-series x86_64 APK compatibility
         required: true
         default: true
         type: boolean
@@ -114,25 +114,37 @@ jobs:
           fi
 
       - name: Fetch and verify third-party APKs
+        id: thirdparty
         env:
           GITHUB_TOKEN: ${{ github.token }}
           OPENCLASH_VERSION: ${{ inputs.openclash_version }}
+          VERSION: ${{ inputs.immortalwrt_version }}
+          STRICT_MODE: ${{ inputs.strict_mode }}
         run: |
           set -euo pipefail
-          python scripts/fetch-thirdparty.py --openclash-version "$OPENCLASH_VERSION"
+          args=(--version "$VERSION" --openclash-version "$OPENCLASH_VERSION")
+          [[ "$STRICT_MODE" == "true" ]] && args+=(--strict)
+          python scripts/fetch-thirdparty.py "${args[@]}"
+          if jq -e 'to_entries | any(.value.status == "unresolved" or .value.status == "incompatible")' \
+            generated/thirdparty-status.json >/dev/null; then
+            echo "suffix=-degraded" >> "$GITHUB_OUTPUT"
+          else
+            echo "suffix=" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build
         env:
           IMMORTALWRT_VERSION: ${{ inputs.immortalwrt_version }}
           ROOTFS_SIZE: ${{ inputs.rootfs_size }}
           PROFILE: generic
+          STRICT_MODE: ${{ inputs.strict_mode }}
         run: scripts/build-image.sh
 
       - name: Upload firmware and migration evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: immortalwrt-${{ inputs.immortalwrt_version }}-x86-64-generic
+          name: immortalwrt-${{ inputs.immortalwrt_version }}-x86-64-generic-${{ github.run_number }}${{ steps.thirdparty.outputs.suffix }}
           if-no-files-found: error
           retention-days: 14
           path: |
@@ -142,6 +154,10 @@ jobs:
             generated/packages-missing.txt
             generated/packages-skipped.txt
             generated/packages-replaced.txt
+            generated/release-capabilities.json
+            generated/official-package-index.json
+            generated/thirdparty-status.json
+            generated/compatibility-report.md
 
       - name: Create GitHub Release
         if: ${{ success() && inputs.create_release }}
