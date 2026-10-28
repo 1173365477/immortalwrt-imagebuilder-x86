@@ -1,6 +1,11 @@
 providers:
   openclash:
     enabled: true
+    strict_compatibility: false
+    supported_package_managers:
+      - apk
+    supported_architectures:
+      - all
     repository: vernesong/OpenClash
     release: tag
     tag_template: v{openclash_version}
@@ -24,10 +29,15 @@ providers:
 
   nikki:
     enabled: true
+    strict_compatibility: true
+    supported_package_managers:
+      - apk
+    supported_architectures:
+      - x86_64
     repository: nikkinikki-org/OpenWrt-nikki
     release: latest
     asset_patterns:
-      - ^nikki_x86_64-openwrt-25\.12\.tar\.gz$
+      - ^nikki_{arch}-openwrt-{target_series}\.tar\.gz$
     require_digest: true
     packages:
       - mihomo-meta
@@ -43,9 +53,14 @@ providers:
 
   lucky:
     enabled: true
+    strict_compatibility: true
+    supported_package_managers:
+      - apk
+    supported_architectures:
+      - x86_64
     repository: leesonaa/build_luci-app-lucky
     release: latest
-    compatibility_body_regex: ImmortalWrt 25\.12
+    compatibility_body_regex: (OpenWrt|ImmortalWrt).*{target_series}
     asset_patterns:
       - ^lucky-[^/]+_x86_64\.apk$
       - ^luci-app-lucky-[^/]+_x86_64\.apk$
