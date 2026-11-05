@@ -68,3 +68,22 @@ def test_invalid_arguments_are_rejected(tmp_path):
         capture_output=True, text=True,
     )
     assert result.returncode != 0
+
+def test_docker_storage_paths_are_redacted(tmp_path):
+    release = tmp_path / "etc/openwrt_release"
+    release.parent.mkdir(parents=True)
+    release.write_text("DISTRIB_ID='ImmortalWrt'\n")
+    config = tmp_path / "etc/config/dockerd"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("config globals 'globals'\n\toption data_root '/mnt/usb/docker'\n\toption password 'DO_NOT_COPY'\n")
+    mounts = tmp_path / "proc/mounts"
+    mounts.parent.mkdir(parents=True)
+    mounts.write_text("/dev/sda1 /mnt/usb ext4 rw 0 0\n/dev/root / overlay rw 0 0\n")
+    safe = scan(tmp_path)
+    full = scan(tmp_path, "local")
+    assert safe["storage"]["docker_root"] is None
+    assert all(m["mountpoint"] is None for m in safe["storage"]["mounts"])
+    assert full["storage"]["docker_root"] == "/mnt/usb/docker"
+    assert full["storage"]["mounts"][0]["mountpoint"] == "/mnt/usb"
+    assert full["storage"]["docker_root_verified"] is False
+    assert "DO_NOT_COPY" not in json.dumps(safe)
