@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - feature/generic-release-support
+      - feature/latest-stable-build
   pull_request:
 
 permissions:

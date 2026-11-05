@@ -14,6 +14,14 @@
 
 > **磁盘安全警告**：`combined-efi.img.gz` 是完整磁盘镜像，主要用于全新安装、救援或完整写盘。本仓库不会刷写磁盘，也不声称它能安全保留你手工扩展后的 GPT、p3、p4 或未分配空间。不要在未单独验证 x86 sysupgrade 对现有 GPT 的处理前，直接 `dd` 到当前 NVMe。
 
+## 一键构建最新稳定版（latest）
+
+在 **Actions → Build ImmortalWrt x86_64 firmware → Run workflow** 中选择 `main`（合并后）或此功能分支，并保持 `immortalwrt_version=latest`。每次运行都会从官方 `https://downloads.immortalwrt.org/releases/` 目录中选择数值版本最高的正式版（仅识别 `major.minor.patch` 目录，排除 snapshot、RC、beta），记录解析后的精确版本，再沿用原有 x86/64、EFI、APK、官方包与第三方兼容性检查。网络或官方目录不可用时直接失败，不回退到默认版本。
+
+**安全限制：** 本仓库属于“根据当前路由器报告构建迁移固件”。`latest` 并不会忽略 `owut` 目标检查。上传的 `reports/current-system.txt` 中 `Version-to` **必须与自动发现的精确版本一致**，否则在构建前明确失败。请在路由器重新生成目标为该版本的报告，并检查脱敏后再提交。未来最新版本改变时必须重新生成 owut 报告；如果只是想构建指定历史版本，仍可手动输入如 `25.12.2`。
+
+下载 Artifact 中的 `resolved-version.txt` 可以确认当次最终选择的版本。只有在校验全部通过后才会生成镜像；不会自动刷机，也不保证完整磁盘镜像保留你的 NVMe 自定义分区。
+
 ## 工作流
 
 ```text
@@ -94,7 +102,7 @@ reports/top-level-packages.txt   # 推荐，owut 用户顶层包
 
 | 输入 | 默认值 | 说明 |
 |---|---:|---|
-| `immortalwrt_version` | `25.12.2` | 精确 release；严格语法校验并读取官方能力元数据 |
+| `immortalwrt_version` | `latest` | 自动选择最新正式版，或输入精确 release（如 25.12.2） |
 | `report_path` | `reports/current-system.txt` | 完整 owut 报告 |
 | `include_openclash` | `true` | 报告触发 OpenClash 时启用 provider |
 | `openclash_version` | `0.48.002` | GitHub Release tag 版本 |
@@ -110,7 +118,7 @@ reports/top-level-packages.txt   # 推荐，owut 用户顶层包
 
 ### Release 能力发现与失败方式
 
-版本只接受 `major.minor`、`major.minor.patch` 和 `major.minor.patch-rcN/betaN/alphaN`，例如 `25.12.2`、`29.0.1`、`29.0.0-rc1`；`latest`、路径、空格和 shell 字符会在联网前被拒绝。验证阶段会：
+显式版本只接受 `major.minor`、`major.minor.patch` 和 `major.minor.patch-rcN/betaN/alphaN`，例如 `25.12.2`、`29.0.1`、`29.0.0-rc1`；仅 `latest` 是允许的自动解析关键词，路径、空格和 shell 字符会在联网前被拒绝。验证阶段会：
 
 1. 要求报告 `Version-to` 与 workflow 输入完全一致；
 2. 从官方 `profiles.json` 确认 target/profile/rootfs/image type 和包管理器；

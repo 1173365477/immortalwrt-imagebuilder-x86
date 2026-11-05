@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       immortalwrt_version:
-        description: Exact ImmortalWrt release; official metadata must expose the required x86/64 capabilities
+        description: latest stable release or exact version (e.g. 25.12.2)
         required: true
-        default: 25.12.2
+        default: latest
         type: string
       report_path:
         description: Path to complete owut check output
@@ -73,6 +73,17 @@ jobs:
           sudo apt-get install --yes jq zstd
           python -m pip install --requirement requirements.txt
 
+      - name: Resolve stable target version
+        id: release
+        env:
+          REQUESTED_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          python scripts/resolve_version.py --version "$REQUESTED_VERSION"
+          version="$(cat generated/resolved-version.txt)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Resolved ImmortalWrt version: $version"
+
       - name: Analyze
         env:
           REPORT_PATH: ${{ inputs.report_path }}
@@ -99,7 +110,7 @@ jobs:
 
       - name: Validate
         env:
-          VERSION: ${{ inputs.immortalwrt_version }}
+          VERSION: ${{ steps.release.outputs.version }}
           STRICT_MODE: ${{ inputs.strict_mode }}
         run: |
           set -euo pipefail
@@ -118,7 +129,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           OPENCLASH_VERSION: ${{ inputs.openclash_version }}
-          VERSION: ${{ inputs.immortalwrt_version }}
+          VERSION: ${{ steps.release.outputs.version }}
           STRICT_MODE: ${{ inputs.strict_mode }}
         run: |
           set -euo pipefail
@@ -134,7 +145,7 @@ jobs:
 
       - name: Build
         env:
-          IMMORTALWRT_VERSION: ${{ inputs.immortalwrt_version }}
+          IMMORTALWRT_VERSION: ${{ steps.release.outputs.version }}
           ROOTFS_SIZE: ${{ inputs.rootfs_size }}
           PROFILE: generic
           STRICT_MODE: ${{ inputs.strict_mode }}
@@ -144,7 +155,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: immortalwrt-${{ inputs.immortalwrt_version }}-x86-64-generic-${{ github.run_number }}${{ steps.thirdparty.outputs.suffix }}
+          name: immortalwrt-${{ steps.release.outputs.version || 'unresolved' }}-x86-64-generic-${{ github.run_number }}${{ steps.thirdparty.outputs.suffix }}
           if-no-files-found: error
           retention-days: 14
           path: |
@@ -158,12 +169,13 @@ jobs:
             generated/official-package-index.json
             generated/thirdparty-status.json
             generated/compatibility-report.md
+            generated/resolved-version.txt
 
       - name: Create GitHub Release
         if: ${{ success() && inputs.create_release }}
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.immortalwrt_version }}
+          VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
           tag="firmware-${VERSION}-${GITHUB_RUN_NUMBER}"
