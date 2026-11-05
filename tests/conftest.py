@@ -19,5 +19,6 @@ def load_hyphenated(alias: str, filename: str) -> None:
 
 
 load_hyphenated("parse_owut_report", "parse-owut-report.py")
+load_hyphenated("resolve_packages", "resolve-packages.py")
 load_hyphenated("validate_manifest", "validate-manifest.py")
 

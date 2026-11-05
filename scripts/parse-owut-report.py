@@ -55,17 +55,24 @@ def package_tokens(value: str) -> list[str]:
     ]
 
 
-def parse_installed_file(path: Path | None) -> tuple[dict[str, str | None], set[str]]:
+def parse_installed_file(path: Path | None) -> tuple[dict[str, str | None], set[str], dict[str, dict[str, Any]]]:
     packages: dict[str, str | None] = {}
     user_installed: set[str] = set()
+    evidence: dict[str, dict[str, Any]] = {}
     if path is None or not path.exists():
-        return packages, user_installed
+        return packages, user_installed, evidence
     text = path.read_text(encoding="utf-8", errors="replace")
     # opkg list-installed output.
     for line in text.splitlines():
         match = re.match(r"^([A-Za-z0-9][A-Za-z0-9+_.@-]*)\s+-\s+(\S+)\s*$", line)
         if match:
             packages[match.group(1)] = match.group(2)
+            evidence[match.group(1)] = {
+                "installed": True,
+                "install_reason": "unknown",
+                "evidence": ["opkg-list-installed"],
+                "confidence": "low",
+            }
     # /usr/lib/opkg/status paragraphs. Fields vary, so only Package/Version/Status
     # are used and the optional user-installed marker is treated as best effort.
     for block in re.split(r"\n\s*\n", text):
@@ -76,14 +83,43 @@ def parse_installed_file(path: Path | None) -> tuple[dict[str, str | None], set[
                 fields[key.strip().lower()] = value.strip()
         name = fields.get("package")
         if name and PACKAGE_RE.fullmatch(name):
+            status = fields.get("status", "")
+            # OPKG status databases may retain non-installed records.  Only the
+            # canonical installed state (or a paragraph with no Status field,
+            # for compatibility with exported minimal fixtures) is inventory.
+            if status and " installed" not in f" {status.lower()}":
+                continue
             packages[name] = fields.get("version")
             status_blob = " ".join(
                 fields.get(key, "")
                 for key in ("status", "user-installed", "auto-installed", "flags")
             ).lower()
-            if "user installed" in status_blob or fields.get("user-installed", "").lower() in {"yes", "true", "1"}:
+            auto = fields.get("auto-installed", "").lower()
+            explicit_user = fields.get("user-installed", "").lower() in {"yes", "true", "1"}
+            reason = "unknown"
+            confidence = "low"
+            proof = ["opkg-status-installed"]
+            if explicit_user or "user installed" in status_blob:
                 user_installed.add(name)
-    return packages, user_installed
+                reason, confidence = "manual", "high"
+                proof.append("opkg-user-installed")
+            elif auto in {"yes", "true", "1"}:
+                reason, confidence = "dependency", "high"
+                proof.append("opkg-auto-installed:true")
+            elif auto in {"no", "false", "0"}:
+                # Auto-Installed:no is positive evidence that OPKG did not
+                # mark the package automatic; it is not proof of repository
+                # origin, but is accepted as manual install intent.
+                reason, confidence = "manual", "medium"
+                user_installed.add(name)
+                proof.append("opkg-auto-installed:false")
+            evidence[name] = {
+                "installed": True,
+                "install_reason": reason,
+                "evidence": proof,
+                "confidence": confidence,
+            }
+    return packages, user_installed, evidence
 
 
 def parse_package_change(line: str) -> tuple[str, dict[str, Any]] | None:
@@ -152,6 +188,8 @@ def parse_report(report_path: Path, installed_path: Path | None, top_level_path:
         "errors": [],
         "sensitive_input_warning": bool(SENSITIVE_RE.search(text)),
         "parser_notes": [],
+        "top_level_manifest": {"state": "missing", "evidence": []},
+        "package_evidence": {},
     }
 
     list_sets = {name: set() for name in SECTION_NAMES.values()}
@@ -175,6 +213,11 @@ def parse_report(report_path: Path, installed_path: Path | None, top_level_path:
             current_section = SECTION_NAMES.get(label)
             if current_section:
                 list_sets[current_section].update(package_tokens(header.group(2)))
+                if current_section in {"top_level_packages", "user_installed_packages"}:
+                    analysis["top_level_manifest"] = {
+                        "state": "empty" if not package_tokens(header.group(2)) else "partial",
+                        "evidence": ["owut-report-list"],
+                    }
             continue
         if current_section:
             if not line.strip():
@@ -227,7 +270,7 @@ def parse_report(report_path: Path, installed_path: Path | None, top_level_path:
             if count:
                 analysis[field] = int(next(value for value in count.groups() if value is not None))
 
-    supplemental, status_user = parse_installed_file(installed_path)
+    supplemental, status_user, supplemental_evidence = parse_installed_file(installed_path)
     list_sets["installed_packages"].update(supplemental)
     list_sets["user_installed_packages"].update(status_user)
     if top_level_path and top_level_path.exists():
@@ -240,11 +283,16 @@ def parse_report(report_path: Path, installed_path: Path | None, top_level_path:
         }
         list_sets["top_level_packages"].update(exported)
         list_sets["user_installed_packages"].update(exported)
+        analysis["top_level_manifest"] = {
+            "state": "empty" if not exported else "partial",
+            "evidence": ["explicit-top-level-file"],
+        }
     for name, version in supplemental.items():
         if name not in analysis["packages"]:
             analysis["packages"][name] = {"from": version, "to": None, "status": "installed"}
         elif not analysis["packages"][name].get("from"):
             analysis["packages"][name]["from"] = version
+        analysis["package_evidence"][name] = supplemental_evidence[name]
 
     # Every package with an old version is known to be installed even if owut did
     # not emit a dedicated Installed packages list.
@@ -261,9 +309,30 @@ def parse_report(report_path: Path, installed_path: Path | None, top_level_path:
     if not analysis["user_installed_count"]:
         analysis["user_installed_count"] = len(analysis["user_installed_packages"])
 
+    if analysis["top_level_manifest"]["state"] == "missing" and (
+        analysis["top_level_packages"] or analysis["user_installed_packages"]
+    ):
+        analysis["top_level_manifest"] = {
+            "state": "partial",
+            "evidence": ["owut-report-list"],
+        }
+
+    known_reason = {
+        name for name, item in analysis["package_evidence"].items()
+        if item.get("install_reason") in {"manual", "dependency", "system_default"}
+    }
+    covered = set(analysis["top_level_packages"]) | set(analysis["user_installed_packages"]) | known_reason
+    installed_set = set(analysis["installed_packages"])
+    manifest = analysis["top_level_manifest"]
+    manifest["unclassified_packages"] = sorted(installed_set - covered)
+    if analysis["top_level_count"] > len(analysis["top_level_packages"]):
+        manifest["evidence"].append("reported-count-exceeds-captured-list")
+    if manifest["state"] == "partial" and not manifest["unclassified_packages"]:
+        manifest["state"] = "complete"
+
     if not analysis["top_level_packages"] and not analysis["user_installed_packages"]:
         analysis["parser_notes"].append(
-            "No explicit top-level/user-installed list was found; resolver will use functional triggers only."
+            "No complete top-level/user-installed list was found; strict migration must block unclassified packages."
         )
     return analysis
 
