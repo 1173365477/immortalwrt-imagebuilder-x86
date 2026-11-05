@@ -93,8 +93,58 @@ function service(name,pattern,   result) {
  for(z=1;z<=count;z++) if(names[z]~pattern)result="detected"
  return q(result)
 }
+function load_storage(  fn,line,parts,val) {
+ docker_root=""; docker_source="unknown"; mount_count=0; mounts_available=0
+ fn=root "/etc/config/dockerd"
+ while ((getline line < fn)>0) {
+   if (line ~ /^[[:space:]]*option[[:space:]]+data_root[[:space:]]+/) {
+     val=line
+     sub(/^[[:space:]]*option[[:space:]]+data_root[[:space:]]+/, "", val)
+     gsub(/^[[:space:]]*["\047]|["\047][[:space:]]*$/, "", val)
+     if(val ~ /^\// && length(val)<=256) {docker_root=val;docker_source="uci-config"}
+   }
+ }
+ close(fn)
+ # JSON daemon data-root may be specified on a single line, but UCI setting
+ # and command-line overrides can still change the effective daemon root.
+ fn=root "/etc/docker/daemon.json"
+ while ((getline line < fn)>0) {
+   if (line ~ /"data-root"[[:space:]]*:/) {
+     val=line
+     sub(/^.*"data-root"[[:space:]]*:[[:space:]]*"/, "", val)
+     sub(/".*$/, "", val)
+     if(val ~ /^\// && length(val)<=256) {docker_root=val;docker_source="daemon-json"}
+   }
+ }
+ close(fn)
+ fn=root "/proc/mounts"
+ while ((getline line < fn)>0) {
+   mounts_available=1
+   split(line,parts,/[[:space:]]+/)
+   if(mount_count<128 && parts[2] ~ /^\//) {
+     mount_source[++mount_count]=parts[1]
+     mount_path[mount_count]=parts[2]
+     mount_type[mount_count]=parts[3]
+   }
+ }
+ close(fn)
+}
+function render_storage(  i) {
+ printf "\"storage\":{\"docker_root\":%s,",privacy=="local" && docker_root!=""?q(docker_root):"null"
+ printf "\"docker_root_source\":%s,\"docker_root_verified\":false,",q(docker_source)
+ printf "\"mounts\":["
+ for(i=1;i<=mount_count;i++) {
+   if(i>1)printf ","
+   printf "{\"source\":%s,\"mountpoint\":%s,\"filesystem\":%s}",privacy=="local"?q(mount_source[i]):"null",privacy=="local"?q(mount_path[i]):"null",q(mount_type[i])
+ }
+ printf "],\"warnings\":[\"Docker Root Dir is configured only, not runtime verified; check Docker daemon and persistent volume mounts manually\""
+ if(!mounts_available)printf ",\"/proc/mounts unavailable\""
+ if(mount_count>=128)printf ",\"mount list truncated at 128 entries\""
+ printf "]},"
+}
 BEGIN {
  get_release()
+ load_storage()
  read_provenance()
  manager="unknown"
  if(exists(root "/usr/lib/opkg/status"))manager="opkg"
@@ -115,7 +165,7 @@ BEGIN {
  printf "\"lucky\":%s,",service("lucky","^(lucky|luci-app-lucky)$")
  printf "\"adguardhome\":%s,",service("adguardhome","^adguardhome$")
  printf "\"docker\":%s},",service("docker","^(docker|dockerd)$")
- printf "\"storage\":{\"docker_root\":null,\"mounts\":[],\"warnings\":[\"Docker Root Dir and persistent mounts not verified; do not assume rootfs persistence\"]},"
+ render_storage()
  printf "\"warnings\":[\"top-level provenance is not authoritative; retain unknown packages for manual review\",\"boot/profile and mount inspection may be incomplete\"],\"errors\":[]}"
 }
 ' /dev/null
