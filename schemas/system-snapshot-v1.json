@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "status",
+    "privacy_mode",
+    "system",
+    "packages",
+    "services",
+    "storage"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "status": {
+      "enum": [
+        "ok",
+        "partial",
+        "blocked",
+        "failed",
+        "unknown"
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "privacy_mode": {
+      "enum": [
+        "local",
+        "redacted"
+      ]
+    },
+    "system": {
+      "type": "object",
+      "properties": {
+        "distribution": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "architecture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "boot_mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "package_manager": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "packages": {
+      "type": "object",
+      "required": [
+        "installed",
+        "top_level",
+        "classification_status"
+      ],
+      "properties": {
+        "installed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9+_.@-]*$"
+              },
+              "version": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "manual",
+                  "default",
+                  "dependency",
+                  "thirdparty",
+                  "unknown"
+                ]
+              },
+              "depends": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "top_level": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "classification_status": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "services": {
+      "type": "object",
+      "additionalProperties": {
+        "enum": [
+          "detected",
+          "not_detected",
+          "unknown"
+        ]
+      }
+    },
+    "storage": {
+      "type": "object",
+      "properties": {
+        "docker_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mounts": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "$id": "https://github.com/1173365477/immortalwrt-imagebuilder-x86/schemas/system-snapshot-v1.json"
+}
