@@ -87,3 +87,20 @@ def test_docker_storage_paths_are_redacted(tmp_path):
     assert full["storage"]["mounts"][0]["mountpoint"] == "/mnt/usb"
     assert full["storage"]["docker_root_verified"] is False
     assert "DO_NOT_COPY" not in json.dumps(safe)
+
+def test_rom_default_and_missing_apk_world_are_not_assumed_manual(tmp_path):
+    release = tmp_path / "etc/openwrt_release"
+    release.parent.mkdir(parents=True)
+    release.write_text("DISTRIB_ID='OpenWrt'\nDISTRIB_RELEASE='25.12.2'\n")
+    installed = tmp_path / "lib/apk/db/installed"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("P:busybox\nV:1.36\n\nP:unsigned-addon\nV:1.0\n\n")
+    rom = tmp_path / "rom/lib/apk/db/installed"
+    rom.parent.mkdir(parents=True)
+    rom.write_text("P:busybox\nV:1.36\n\n")
+    report = scan(tmp_path)
+    source = {pkg["name"]: pkg["source"] for pkg in report["packages"]["installed"]}
+    assert source["busybox"] == "default"
+    assert source["unsigned-addon"] == "unknown"
+    assert report["packages"]["top_level"] == []
+    assert report["packages"]["classification_status"] == "unknown"
