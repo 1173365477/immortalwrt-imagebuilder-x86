@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "status",
+    "target_version",
+    "decisions",
+    "blockers"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "status": {
+      "enum": [
+        "ok",
+        "partial",
+        "blocked",
+        "failed",
+        "unknown"
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "target_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source_snapshot_digest": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "package",
+          "decision",
+          "reason"
+        ],
+        "properties": {
+          "package": {
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "keep",
+              "replace",
+              "skip",
+              "block",
+              "review"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "compatible": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "strict_mode": {
+      "type": "boolean"
+    }
+  },
+  "$id": "https://github.com/1173365477/immortalwrt-imagebuilder-x86/schemas/migration-plan-v1.json"
+}
