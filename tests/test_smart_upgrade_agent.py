@@ -141,11 +141,17 @@ def _storage_fixture(tmp_path, docker_root="/var/lib/docker", config_root=None, 
 
 def test_runtime_docker_root_wins_and_records_config_mismatch(tmp_path):
     fixture = _storage_fixture(tmp_path, "/data/docker", "/var/lib/docker", "25 1 0:1 / / rw - overlay overlay rw\n26 1 8:2 / /data rw - ext4 /dev/sdb2 rw\n")
+    sys_size = tmp_path / "sys/dev/block/8:2/size"
+    sys_size.parent.mkdir(parents=True)
+    sys_size.write_text("2097152\n")
     report = scan(tmp_path, "local", fixture)
     assert report["storage"]["docker"]["root"] == "/data/docker"
     assert report["storage"]["docker"]["verified"] is True
     assert report["storage"]["docker"]["config_mismatch"] is True
     assert report["storage"]["targets"][0]["risk"] == "external_persistent"
+    data_mount = report["storage"]["mount_inventory"]["entries"][1]
+    assert data_mount["block_resolution"] == "resolved"
+    assert data_mount["size_bytes"] == 1073741824
 
 
 def test_root_volume_and_external_bind_are_independently_classified(tmp_path):

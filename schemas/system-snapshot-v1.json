@@ -61,7 +61,7 @@
       "provides_raw": {"type": ["string", "null"], "maxLength": 8192}
     }},
     "service": {"type": "object", "additionalProperties": false, "required": ["package_detected", "executable_exists", "service_definition_exists", "running"], "properties": {"package_detected": {"type": ["boolean", "null"]}, "executable_exists": {"type": ["boolean", "null"]}, "service_definition_exists": {"type": ["boolean", "null"]}, "running": {"enum": ["running", "stopped", "unknown"]}}},
-    "mount": {"type": "object", "additionalProperties": false, "required": ["id", "mountpoint", "device", "filesystem", "root", "risk"], "properties": {"id": {"type": "string", "pattern": "^mount-[1-9][0-9]*$"}, "mountpoint": {"type": ["string", "null"]}, "device": {"type": ["string", "null"]}, "filesystem": {"type": "string"}, "root": {"type": ["string", "null"]}, "risk": {"enum": ["external_persistent", "rootfs_or_overlay", "special_mount", "unknown"]}}},
+    "mount": {"type": "object", "additionalProperties": false, "required": ["id", "mountpoint", "device", "device_major_minor", "filesystem", "root", "block_resolution", "size_bytes", "risk"], "properties": {"id": {"type": "string", "pattern": "^mount-[1-9][0-9]*$"}, "mountpoint": {"type": ["string", "null"]}, "device": {"type": ["string", "null"]}, "device_major_minor": {"type": ["string", "null"]}, "filesystem": {"type": "string"}, "root": {"type": ["string", "null"]}, "block_resolution": {"enum": ["resolved", "unknown"]}, "size_bytes": {"type": ["integer", "null"], "minimum": 0}, "risk": {"enum": ["external_persistent", "rootfs_or_overlay", "special_mount", "unknown"]}}},
     "target": {"type": "object", "additionalProperties": false, "required": ["kind", "source", "destination", "name", "mount_id", "risk", "verified"], "properties": {"kind": {"enum": ["docker_root", "bind", "volume"]}, "source": {"type": ["string", "null"]}, "destination": {"type": ["string", "null"]}, "name": {"type": ["string", "null"]}, "mount_id": {"type": ["string", "null"]}, "risk": {"enum": ["external_persistent", "rootfs_or_overlay", "special_mount", "unknown"]}, "verified": {"type": "boolean"}}},
     "storage": {"type": "object", "additionalProperties": false, "required": ["status", "docker", "mount_inventory", "targets", "errors"], "properties": {
       "status": {"$ref": "#/$defs/status"},
@@ -74,7 +74,7 @@
         {"$ref": "#/$defs/storage"},
         {"properties": {
           "docker": {"properties": {"root": {"type": "null"}, "configured_root": {"type": "null"}}},
-          "mount_inventory": {"properties": {"entries": {"items": {"properties": {"mountpoint": {"type": "null"}, "device": {"type": "null"}, "root": {"type": "null"}}}}}},
+          "mount_inventory": {"properties": {"entries": {"items": {"properties": {"mountpoint": {"type": "null"}, "device": {"type": "null"}, "device_major_minor": {"type": "null"}, "root": {"type": "null"}}}}}},
           "targets": {"items": {"properties": {"source": {"type": "null"}, "destination": {"type": "null"}, "name": {"type": "null"}}}}
         }}
       ]

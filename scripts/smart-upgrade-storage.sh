@@ -60,7 +60,7 @@ DAEMON_JSON="$ROOT/etc/docker/daemon.json"
 awk -v privacy="$PRIVACY" -v runtime="$DOCKER_RUNTIME" \
   -v runtime_state="$DOCKER_RUNTIME_STATE" -v mount_rows="$DOCKER_MOUNTS" \
   -v docker_mounts_state="$DOCKER_MOUNTS_STATE" -v max_mounts="$MAX_MOUNTS" \
-  -v mountinfo="$MOUNTINFO" -v uci="$UCI" -v daemon_json="$DAEMON_JSON" '
+  -v mountinfo="$MOUNTINFO" -v uci="$UCI" -v daemon_json="$DAEMON_JSON" -v root_prefix="$ROOT" '
 function esc(s) { gsub(/\\/,"\\\\",s);gsub(/"/,"\\\"",s);gsub(/[\r\n\t]/," ",s);gsub(/[^[:print:]]/,"?",s);if(length(s)>1024)s=substr(s,1,1024);return s }
 function q(s) { return "\"" esc(s) "\"" }
 function clean_mount(s) { gsub(/\\040/," ",s);gsub(/\\011/,"\t",s);gsub(/\\134/,"\\",s);return s }
@@ -76,6 +76,13 @@ function classify(i) {
   if(mp[i]=="/" || fs[i]~/^(overlay|rootfs)$/ || dev[i]=="/dev/root")return "rootfs_or_overlay"
   if(dev[i]~/^\/dev\// && mp[i]!="/")return "external_persistent"
   return "unknown"
+}
+function block_metadata(i,  fn,line,sectors) {
+  block_state[i]="unknown";size_bytes[i]=""
+  if(majmin[i]!~/^[0-9]+:[0-9]+$/)return
+  fn=root_prefix "/sys/dev/block/" majmin[i] "/size"
+  if((getline line < fn)>0 && line~/^[0-9]+$/){sectors=line+0;size_bytes[i]=sectors*512;block_state[i]="resolved"}
+  close(fn)
 }
 function best_mount(path,  i,best) {
   best=0
@@ -96,7 +103,7 @@ BEGIN {
     n=split(line,a," ");dash=0
     for(i=7;i<=n;i++)if(a[i]=="-"){dash=i;break}
     if(!dash || dash+2>n){parse_error=1;continue}
-    mc++;mp[mc]=clean_mount(a[5]);fs[mc]=a[dash+1];dev[mc]=clean_mount(a[dash+2]);rootpath[mc]=clean_mount(a[4])
+    mc++;majmin[mc]=a[3];mp[mc]=clean_mount(a[5]);fs[mc]=a[dash+1];dev[mc]=clean_mount(a[dash+2]);rootpath[mc]=clean_mount(a[4]);block_metadata(mc)
   }
   close(mountinfo)
   configured="";config_source="none"
@@ -124,7 +131,7 @@ BEGIN {
   printf "\"docker\":{\"installed\":%s,\"daemon_state\":%s,",runtime_state=="unavailable"&&configured==""?"false":"true",q(runtime_state)
   printf "\"root\":%s,\"configured_root\":%s,\"root_source\":%s,\"verified\":%s,\"config_mismatch\":%s},",privacy=="local"&&effective!=""?q(effective):"null",privacy=="local"&&configured!=""?q(configured):"null",q(source),verified?"true":"false",verified&&configured!=""&&configured!=effective?"true":"false"
   printf "\"mount_inventory\":{\"state\":%s,\"truncated\":%s,\"entries\":[",q(!mount_ok?"missing":(truncated||parse_error?"partial":"complete")),truncated?"true":"false"
-  for(i=1;i<=mc;i++){if(i>1)printf ",";printf "{\"id\":%s,\"mountpoint\":%s,\"device\":%s,\"filesystem\":%s,\"root\":%s,\"risk\":%s}",q("mount-" i),privacy=="local"?q(mp[i]):"null",privacy=="local"?q(dev[i]):"null",q(fs[i]),privacy=="local"?q(rootpath[i]):"null",q(classify(i))}
+  for(i=1;i<=mc;i++){if(i>1)printf ",";printf "{\"id\":%s,\"mountpoint\":%s,\"device\":%s,\"device_major_minor\":%s,\"filesystem\":%s,\"root\":%s,\"block_resolution\":%s,\"size_bytes\":%s,\"risk\":%s}",q("mount-" i),privacy=="local"?q(mp[i]):"null",privacy=="local"?q(dev[i]):"null",privacy=="local"?q(majmin[i]):"null",q(fs[i]),privacy=="local"?q(rootpath[i]):"null",q(block_state[i]),size_bytes[i]==""?"null":sprintf("%.0f",size_bytes[i]),q(classify(i))}
   printf "]},\"targets\":["
   for(i=1;i<=tc;i++){if(i>1)printf ",";printf "{\"kind\":%s,\"source\":%s,\"destination\":%s,\"name\":%s,\"mount_id\":%s,\"risk\":%s,\"verified\":%s}",q(tk[i]),privacy=="local"?q(ts[i]):"null",privacy=="local"&&td[i]!=""?q(td[i]):"null",privacy=="local"&&tn[i]!=""?q(tn[i]):"null",tm[i]?q("mount-" tm[i]):"null",q(tr[i]),tv[i]?"true":"false"}
   printf "],\"errors\":["
