@@ -37,8 +37,8 @@ def test_opkg_empty_top_level_and_sensitive_data(tmp_path):
     result = scan(tmp_path)
     assert result["system"]["package_manager"] == "opkg"
     assert len(result["packages"]["installed"]) == 3
-    assert result["packages"]["top_level"] == []
-    assert result["packages"]["classification_status"] == "unknown"
+    assert result["packages"]["top_level"] == ["luci-app-openclash"]
+    assert result["packages"]["classification_status"] == "partial"
     assert result["services"]["openclash"] == "detected"
     assert result["services"]["docker"] == "detected"
     assert "THIS_MUST_NOT_LEAK" not in json.dumps(result)
@@ -51,9 +51,13 @@ def test_apk_future_release_unknown_is_not_compatible(tmp_path):
     apk = tmp_path / "lib/apk/db/installed"
     apk.parent.mkdir(parents=True)
     apk.write_text("P:lucky\nV:2.0\nD:libc libgcc\n\nP:unverified-thirdparty\nV:1.0\n\n")
+    world = tmp_path / "etc/apk/world"
+    world.parent.mkdir(parents=True, exist_ok=True)
+    world.write_text("lucky\n")
     result = scan(tmp_path, "local")
     assert result["system"]["package_manager"] == "apk"
     assert result["services"]["lucky"] == "detected"
+    assert result["packages"]["top_level"] == ["lucky"]
     assert {p["name"] for p in result["packages"]["installed"]} == {"lucky", "unverified-thirdparty"}
     assert result["status"] == "partial"
 
