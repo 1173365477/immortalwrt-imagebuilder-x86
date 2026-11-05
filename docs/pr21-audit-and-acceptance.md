@@ -6,7 +6,7 @@ Safety boundary: no router connection, package mutation, source refresh, service
 
 ## Outcome
 
-The baseline HEAD had not changed when remediation began. The changes are incremental and retain the existing Actions inputs, analyzer CLI flags, report names and firmware build entry point. Unknown evidence remains unknown or becomes an explicit review/block decision. The PR must remain Draft until the latest GitHub Actions run is green; `flash_ready` is unconditionally false in the v1 protocol.
+The baseline HEAD had not changed when remediation began. The changes are incremental and retain the existing Actions inputs, analyzer CLI flags, report names and firmware build entry point. Unknown evidence remains unknown or becomes an explicit review/block decision. The latest implementation CI is green; `flash_ready` is unconditionally false in the v1 protocol.
 
 ## Original findings and remediation
 
@@ -29,7 +29,7 @@ The baseline HEAD had not changed when remediation began. The changes are increm
 | T01 repository audit | `docs/sprint-0-audit.md`; this report | full suite and diff review | Baseline and safety boundaries recorded; issues mapped to fixes | Audit is scoped to PR and relevant pre-existing build path | PASS |
 | T02 target version parsing | `.github/workflows/build.yml` release step; `scripts/resolve_version.py` | `test_build_version_is_taken_from_dispatch_input_not_self_reference`; existing release tests | Dispatch input is consumed before the step output exists; downstream output name retained | Online release metadata remains time-dependent | PASS |
 | T03 three v1 Schemas | `schemas/*.json`; `docs/schema-v1-protocol.md` | positive/negative cases in `test_schema_contracts.py` | Required trace, status, privacy, blocker and MVP no-flash semantics enforced | Historical `system-analysis.json` intentionally remains a separate legacy artifact | PASS |
-| T04 CI baseline | `.github/workflows/ci.yml` | 70 pytest cases; actionlint; ShellCheck; workflow regressions | Local suite, actionlint and ShellCheck pass | GitHub-hosted online package-index step must pass on latest pushed HEAD | PASS after linked CI is green |
+| T04 CI baseline | `.github/workflows/ci.yml` | 70 pytest cases; actionlint; ShellCheck; workflow regressions | Local suite and GitHub-hosted online validation pass | Online release metadata remains external and time-dependent | PASS |
 | T05 identity and package manager | scanner; `identity-compat.py` | realistic OPKG/APK, non-installed, EFI/BIOS/unknown, architecture conflict tests | All uncertain values remain explicit; image selection is conservative | Hardware-specific ubus/sysfs variants beyond fixtures remain possible and must return unknown | PASS |
 | T06 origin/install reason | scanner ROM baselines and optional read-only ROM origin manifest | official/third-party/unknown, manual/dependency/default/unknown tests | Origin is independent from intent; no feed origin is guessed | Existing devices without ROM origin evidence classify non-default origin as unknown | PASS |
 | T07 top-level fallback | parser/resolver and `package-decisions.json` | missing, empty, partial, complete and explicit-ignore conflict tests | Every installed package receives keep/replace/skip/block/review evidence; strict mode sees unresolved rows | A complete list still depends on truthful package-manager metadata | PASS |
@@ -42,17 +42,19 @@ The baseline HEAD had not changed when remediation began. The changes are increm
 - ShellCheck 0.10.0: passed for `smart-upgrade-agent.sh`, `smart-upgrade-storage.sh`, existing build script and first-boot script.
 - actionlint 1.7.7: passed for all workflows.
 - `git diff --check`: passed.
-- GitHub Actions: `CI_RUN_LINK_PENDING`.
+- GitHub Actions implementation run: [Project self-test #47](https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/42008119694) — all steps passed.
 
 No firmware build was executed as part of this acceptance. The existing online index validation remains in GitHub CI and does not certify a produced image for flashing.
 
 ## Commits after the audit baseline
 
-1. `8a6454e` — block incomplete package intent evidence.
-2. `f2393e2` — conservative identity, package, service and storage evidence.
-3. `05d760a` — constrained schemas and workflow regressions.
-4. `66ffbde` — realistic package formats, dependency relations and user-intent safeguards.
-5. `9ac9719` — block-device resolution and capacity evidence.
+1. `9ba69b2` — block incomplete package intent evidence.
+2. `2d0d63c` — conservative identity, package, service and storage evidence.
+3. `443fc6f` — constrained schemas and workflow regressions.
+4. `0ee4dad` — realistic package formats, dependency relations and user-intent safeguards.
+5. `2ca284f` — block-device resolution and capacity evidence.
+6. `5da3438` — acceptance report, evidence digest and ROM origin support.
+7. `1416641` — satisfy actionlint workflow shell checking without lowering rules.
 
 ## First-boot third-party installer audit
 
@@ -76,5 +78,5 @@ This is a distinct future mutation boundary: (1) local scanner is read-only, (2)
 
 ## Ready-for-review decision
 
-The code-level Sprint 0–1 criteria are satisfied, but the PR stays **Draft** until the latest HEAD GitHub CI run is green and linked above. Any future P0 regression, unknown-to-compatible coercion, or first-boot trust change returns the decision to blocked. Even after Ready for Review, this PR does not authorize merge, image flashing or router mutation.
+The code-level Sprint 0–1 criteria and current CI satisfy the conditions for **Ready for Review**. This task leaves the PR in Draft so the repository owner can make the explicit state transition after reading the security boundary and first-boot risk section. Any future P0 regression, unknown-to-compatible coercion, or first-boot trust change returns the decision to blocked. Ready for Review would not authorize merge, image flashing or router mutation.
 
