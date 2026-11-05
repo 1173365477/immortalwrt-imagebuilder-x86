@@ -46,7 +46,9 @@ if [ -n "$FIXTURE_DIR" ]; then
   fi
   if [ -r "$FIXTURE_DIR/docker-volumes.tsv" ]; then
     while IFS="$(printf '\t')" read -r volume_name volume_path; do
-      [ -n "$volume_name" ] && [ -n "$volume_path" ] || continue
+      if [ -z "$volume_name" ] || [ -z "$volume_path" ]; then
+        continue
+      fi
       row=$(printf 'volume\t%s\t\t%s' "$volume_path" "$volume_name")
       if [ -n "$DOCKER_MOUNTS" ]; then DOCKER_MOUNTS="$DOCKER_MOUNTS
 $row"; else DOCKER_MOUNTS=$row; fi
