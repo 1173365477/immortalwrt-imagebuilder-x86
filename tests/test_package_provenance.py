@@ -93,6 +93,17 @@ def test_non_installed_opkg_paragraph_is_excluded(tmp_path):
     assert "stale" not in analysis["installed_packages"]
 
 
+def test_explicit_user_package_is_not_silently_dropped_by_dependency_rule(tmp_path):
+    analysis = _parse(
+        tmp_path,
+        "Package: libcustom\nVersion: 1\nStatus: install ok installed\nAuto-Installed: no\n\n",
+        "libcustom\n",
+    )
+    result = _resolve(tmp_path, analysis)
+    assert result["decisions"]["libcustom"]["decision"] == "review"
+    assert any(row.startswith("libcustom\t") for row in result["missing"])
+
+
 def test_invalid_utf8_is_explicit_parse_failure(tmp_path):
     report = tmp_path / "report.txt"
     report.write_bytes(b"Version-to  25.12.2\n\xff")

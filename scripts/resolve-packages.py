@@ -200,6 +200,8 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
         if package in remove:
             removals.add(f"-{package}")
             skipped.add(f"{package}\tremoved because a conflicting replacement is selected")
+            if package in installed:
+                decisions[package] = {"decision": "skip", "reason": "conflicting replacement selected", "evidence": ["remove-if-present-rule"]}
             continue
         # The current owut report is authoritative. Static rules only fill gaps
         # when owut did not emit replacement metadata.
@@ -208,16 +210,24 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
             if target and VALID_PACKAGE.fullmatch(target):
                 official.add(target)
                 replaced.add(f"{package} -> {target}\towut replacement")
+                decisions[package] = {"decision": "replace", "reason": f"owut replacement: {target}", "evidence": ["owut-package-change"]}
             else:
                 skipped.add(f"{package}\tremoved/replaced by target defaults")
+                decisions[package] = {"decision": "skip", "reason": "owut reports removal by target defaults", "evidence": ["owut-package-change"]}
             continue
         if package in replacements:
             target = replacements[package]
             official.add(target)
             replaced.add(f"{package} -> {target}\trule replacement")
+            decisions[package] = {"decision": "replace", "reason": f"versioned replacement rule: {target}", "evidence": ["package-rule"]}
             continue
         if package in ignore or (package.startswith(ignore_prefixes) and package not in rules.get("always_keep", [])):
-            skipped.add(f"{package}\tautomatic/library dependency; ImageBuilder will resolve it")
+            if package in primary:
+                missing.add(f"{package}\texplicitly selected package matches dependency ignore rule; manual review required")
+                decisions[package] = {"decision": "review", "reason": "explicit user intent conflicts with dependency ignore rule", "evidence": ["primary-manifest", "dependency-ignore-rule"]}
+            else:
+                skipped.add(f"{package}\tpackage-manager evidence marks dependency; ImageBuilder will resolve it")
+                decisions[package] = {"decision": "skip", "reason": "explicit dependency evidence; target resolver will recalculate", "evidence": package_evidence.get(package, {}).get("evidence", [])}
             continue
         provider = thirdparty_map.get(package, {}).get("provider")
         if provider:
@@ -228,10 +238,12 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
             continue
         if status == "missing":
             missing.add(f"{package}\tmissing in target version and no provider rule matched")
+            decisions[package] = {"decision": "block", "reason": "missing in target and no replacement/provider", "evidence": ["owut-package-change"]}
             continue
         if status == "downgrade":
             reason = "downgrade blocked by never_downgrade rule" if package in never_downgrade else "downgrade requires explicit user review"
             missing.add(f"{package}\t{reason}: {details.get('from')} -> {details.get('to')}")
+            decisions[package] = {"decision": "review", "reason": reason, "evidence": ["owut-package-change"]}
             continue
         if package.startswith("kmod-") and not any(pattern.fullmatch(package) for pattern in kernel_patterns):
             skipped.add(f"{package}\told kernel module not on the functional/hardware allowlist")

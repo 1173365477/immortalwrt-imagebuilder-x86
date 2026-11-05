@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -237,3 +238,33 @@ def test_identity_conflict_is_explicit(tmp_path):
     report = scan(tmp_path, fixture_dir=fixture)
     assert report["system"]["identity_status"] == "conflict"
     assert set(report["system"]["identity_errors"]) == {"target_uname_arch_mismatch", "release_package_arch_mismatch"}
+
+
+def test_realistic_apk_v3_database_keeps_constraints_and_virtual_relations(tmp_path):
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc/openwrt_release").write_text("DISTRIB_ID='OpenWrt'\nDISTRIB_RELEASE='25.12.2'\n")
+    installed = tmp_path / "lib/apk/db/installed"
+    installed.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / "tests/fixtures/apk-v3-installed.txt", installed)
+    report = scan(tmp_path, "local")
+    app = next(item for item in report["packages"]["installed"] if item["name"] == "luci-app-example")
+    assert app["dependencies_raw"] == "libc>=1.2.5-r0 so:libubus.so.20250102 virtual:rpc-provider"
+    assert [(item["relation"], item["name"]) for item in app["depends"]] == [
+        ("package", "libc"), ("soname", "libubus.so.20250102"), ("virtual", "rpc-provider")
+    ]
+    assert app["depends"][0]["operator"] == ">="
+    assert app["depends"][0]["version"] == "1.2.5-r0"
+    assert app["provides_raw"] == "virtual:luci-app-example=2.0.0-r1"
+
+
+def test_realistic_opkg_status_excludes_removed_and_preserves_auto_reason(tmp_path):
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc/openwrt_release").write_text("DISTRIB_ID='ImmortalWrt'\n")
+    status = tmp_path / "usr/lib/opkg/status"
+    status.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / "tests/fixtures/opkg-status-realistic.txt", status)
+    report = scan(tmp_path, "local")
+    packages = {item["name"]: item for item in report["packages"]["installed"]}
+    assert set(packages) == {"busybox", "libubox20240329"}
+    assert packages["busybox"]["install_reason"] == "manual"
+    assert packages["libubox20240329"]["install_reason"] == "dependency"

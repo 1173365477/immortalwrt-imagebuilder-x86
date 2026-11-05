@@ -1,0 +1,32 @@
+C:Q1aDummyChecksumForFixtureOnly
+P:busybox
+V:1.37.0-r12
+A:x86_64
+S:512000
+I:933888
+T:Size optimized toolbox of many common UNIX utilities
+U:https://busybox.net/
+L:GPL-2.0-only
+o:busybox
+m:OpenWrt team
+t:1760000000
+c:deadbeef
+D:so:libc.musl-x86_64.so.1
+p:cmd:sh=1.37.0-r12 cmd:busybox=1.37.0-r12
+
+C:Q1bDummyChecksumForFixtureOnly
+P:luci-app-example
+V:2.0.0-r1
+A:x86_64
+S:4096
+I:8192
+T:Example application
+U:https://example.invalid/
+L:MIT
+o:luci-app-example
+m:fixture
+t:1760000001
+c:cafebabe
+D:libc>=1.2.5-r0 so:libubus.so.20250102 virtual:rpc-provider
+p:virtual:luci-app-example=2.0.0-r1
+

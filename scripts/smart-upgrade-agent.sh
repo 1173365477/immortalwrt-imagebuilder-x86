@@ -125,7 +125,7 @@ function read_provenance(  fn,line,p) {
  while ((getline line < fn)>0) if(line~/^P:/)rom[substr(line,3)]=1
  close(fn)
 }
-function emit_package(  name,origin,reason,confidence,dep,raw,j,installed) {
+function emit_package(  name,origin,reason,confidence,dep,raw,j,installed,relation,parsed,op,dver,rest) {
  if(pkg=="") return
  if(pkg !~ /^[A-Za-z0-9][A-Za-z0-9+_.@-]*$/) {pkg="";return}
  installed=(manager=="apk" || status=="" || tolower(status) ~ /(^|[[:space:]])installed($|[[:space:]])/)
@@ -139,8 +139,14 @@ function emit_package(  name,origin,reason,confidence,dep,raw,j,installed) {
  else proof=(manager=="apk"?"apk-installed-db":"opkg-status-installed")
  if(count>0) printf ","
  printf "{\"name\":%s,\"version\":%s,\"origin\":%s,\"install_reason\":%s,\"confidence\":%s,\"evidence\":[%s],\"dependencies_raw\":%s,\"depends\":[",q(name),ver==""?"null":q(ver),q(origin),q(reason),q(confidence),q(proof),deps==""?"null":q(deps)
- raw=deps;n=split(raw,ds,manager=="apk"?/[[:space:]]+/:",")
- for(i=1;i<=n&&j<256;i++){dep=ds[i];gsub(/^[ \t]+|[ \t]+$/,"",dep);if(dep!=""){if(j++>0)printf ",";printf "{\"raw\":%s",q(substr(dep,1,1024));if(match(dep,/^[A-Za-z0-9][A-Za-z0-9+_.@-]*/))printf ",\"name\":%s",q(substr(dep,RSTART,RLENGTH));else printf ",\"name\":null,\"parse_error\":\"unrecognized-dependency-expression\"";printf "}"}}
+ raw=deps;sep=(manager=="apk"?"[[:space:]]+":",");n=split(raw,ds,sep)
+ for(i=1;i<=n&&j<256;i++){dep=ds[i];gsub(/^[ \t]+|[ \t]+$/,"",dep);if(dep!=""){
+   relation="package";parsed=dep;if(parsed~/^so:/){relation="soname";parsed=substr(parsed,4)}else if(parsed~/^virtual:/){relation="virtual";parsed=substr(parsed,9)}
+   if(j++>0)printf ",";printf "{\"raw\":%s,\"relation\":%s",q(substr(dep,1,1024)),q(relation)
+   if(match(parsed,/^[A-Za-z0-9][A-Za-z0-9+_.@-]*/)){dname=substr(parsed,RSTART,RLENGTH);rest=substr(parsed,RLENGTH+1);op="";dver="";if(match(rest,/^(>=|<=|=|>|<|~)/)){op=substr(rest,RSTART,RLENGTH);dver=substr(rest,RLENGTH+1)};printf ",\"name\":%s,\"operator\":%s,\"version\":%s",q(dname),op==""?"null":q(op),dver==""?"null":q(dver)}
+   else printf ",\"name\":null,\"operator\":null,\"version\":null,\"parse_error\":\"unrecognized-dependency-expression\""
+   printf "}"
+ }}
  printf "],\"provides_raw\":%s}",provides==""?"null":q(provides)
  pkg=ver=auto=deps=status=provides="";j=0;count++
 }
