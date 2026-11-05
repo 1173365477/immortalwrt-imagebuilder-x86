@@ -65,7 +65,7 @@ jobs:
             --include-openclash true \
             --include-nikki true \
             --include-lucky true
-          grep -q '^bandix' generated/packages-missing.txt
+          grep -q '^unknown-provenance' generated/packages-missing.txt
           grep -q '^openclash:luci-app-openclash$' generated/packages-thirdparty.txt
 
       - name: Validate official 25.12.2 package indexes
@@ -83,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           if python scripts/validate-manifest.py --version 25.12.2 --strict; then
-            echo "strict mode unexpectedly accepted the unresolved Bandix fixture" >&2
+            echo "strict mode unexpectedly accepted missing top-level provenance" >&2
             exit 1
           fi
-          echo "strict mode correctly rejected the unresolved fixture"
+          echo "strict mode correctly rejected unknown package provenance"
