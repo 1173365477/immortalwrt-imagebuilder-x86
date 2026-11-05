@@ -1,0 +1,16 @@
+owut - OpenWrt Upgrade Tool 2026.07.08~db17536e-r1 (/usr/bin/owut)
+ERROR: uclient error code=2
+  This could be due to the server being down or inaccessible, check
+  https://sysupgrade.immortalwrt.org/json/v1/releases/25.12.2/packages/x86_64-index.json
+Reference error: left-hand side expression is null
+In _request(), file /usr/bin/owut, line 538, byte 33:
+  called from function dl_json (/usr/bin/owut:586:35)
+  called from function dl_package_versions (/usr/bin/owut:634:58)
+  called from function collect_packages (/usr/bin/owut:1184:43)
+  called from function collect_all (/usr/bin/owut:1589:19)
+  called from anonymous function (/usr/bin/owut:2350:15)
+
+ `        let bytes = fs.stat(dst_file).size;`
+  Near here ----------------------------^
+
+
