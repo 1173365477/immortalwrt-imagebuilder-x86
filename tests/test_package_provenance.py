@@ -4,6 +4,7 @@ from pathlib import Path
 
 from parse_owut_report import parse_report
 from resolve_packages import resolve
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,4 +91,18 @@ def test_non_installed_opkg_paragraph_is_excluded(tmp_path):
         "",
     )
     assert "stale" not in analysis["installed_packages"]
+
+
+def test_invalid_utf8_is_explicit_parse_failure(tmp_path):
+    report = tmp_path / "report.txt"
+    report.write_bytes(b"Version-to  25.12.2\n\xff")
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        parse_report(report, None, None)
+
+
+def test_oversized_report_is_rejected_before_parse(tmp_path):
+    report = tmp_path / "report.txt"
+    report.write_bytes(b"x" * (8 * 1024 * 1024 + 1))
+    with pytest.raises(ValueError, match="byte limit"):
+        parse_report(report, None, None)
 

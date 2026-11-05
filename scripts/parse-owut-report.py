@@ -32,6 +32,18 @@ SECTION_NAMES = {
 SENSITIVE_RE = re.compile(
     r"(?i)(-----BEGIN [A-Z ]*PRIVATE KEY-----|(?:token|password|passwd|secret|subscription)\s*[:=]|https?://[^\s]+@)"
 )
+MAX_REPORT_BYTES = 8 * 1024 * 1024
+MAX_PACKAGE_EXPORT_BYTES = 16 * 1024 * 1024
+
+
+def read_bounded_utf8(path: Path, limit: int) -> str:
+    size = path.stat().st_size
+    if size > limit:
+        raise ValueError(f"input exceeds {limit} byte limit: {path}")
+    try:
+        return path.read_text(encoding="utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"input is not valid UTF-8: {path}: {exc}") from exc
 
 
 def clean_version(value: str) -> str:
@@ -43,6 +55,7 @@ def redact(value: str) -> str:
     if SENSITIVE_RE.search(value):
         return "[redacted: report line looked sensitive]"
     value = re.sub(r"https?://\S+", "[url]", value)
+    value = re.sub(r"[\x00-\x1f\x7f]", " ", value)
     return value[:500]
 
 
@@ -61,7 +74,7 @@ def parse_installed_file(path: Path | None) -> tuple[dict[str, str | None], set[
     evidence: dict[str, dict[str, Any]] = {}
     if path is None or not path.exists():
         return packages, user_installed, evidence
-    text = path.read_text(encoding="utf-8", errors="replace")
+    text = read_bounded_utf8(path, MAX_PACKAGE_EXPORT_BYTES)
     # opkg list-installed output.
     for line in text.splitlines():
         match = re.match(r"^([A-Za-z0-9][A-Za-z0-9+_.@-]*)\s+-\s+(\S+)\s*$", line)
@@ -167,7 +180,7 @@ def parse_package_change(line: str) -> tuple[str, dict[str, Any]] | None:
 
 
 def parse_report(report_path: Path, installed_path: Path | None, top_level_path: Path | None) -> dict[str, Any]:
-    text = report_path.read_text(encoding="utf-8", errors="replace")
+    text = read_bounded_utf8(report_path, MAX_REPORT_BYTES)
     lines = text.splitlines()
     analysis: dict[str, Any] = {
         "source_version": None,
@@ -274,7 +287,7 @@ def parse_report(report_path: Path, installed_path: Path | None, top_level_path:
     list_sets["installed_packages"].update(supplemental)
     list_sets["user_installed_packages"].update(status_user)
     if top_level_path and top_level_path.exists():
-        top_level_text = top_level_path.read_text(encoding="utf-8", errors="replace")
+        top_level_text = read_bounded_utf8(top_level_path, MAX_PACKAGE_EXPORT_BYTES)
         exported = {
             token
             for line in top_level_text.splitlines()
