@@ -43,8 +43,7 @@ function emit_package(  name,src,dep) {
  name=pkg; names[count+1]=name; src="unknown"
  if(auto ~ /^(yes|true|1)$/) src="dependency"
  else if(auto ~ /^(no|false|0)$/) src="manual"
- if(first==0) printf ","
- first=0
+ if(count>0) printf ","
  printf "{\"name\":%s,\"version\":%s,\"source\":%s,\"depends\":[",q(name),ver==""?"null":q(ver),q(src)
  n=split(deps,ds,",")
  for(i=1;i<=n;i++){dep=ds[i];gsub(/^[ \t]+|[ \t]+$/,"",dep);sub(/ .*/,"",dep);if(dep~/^[A-Za-z0-9][A-Za-z0-9+_.@-]*$/){if(j++>0)printf ",";printf "%s",q(dep)}}
