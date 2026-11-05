@@ -93,10 +93,10 @@ BEGIN {
  printf "],\"top_level\":[],\"classification_status\":\"unknown\"},"
  # No service commands, no Docker socket and no config/environment secrets.
  printf "\"services\":{"
- printf "\"openclash\":%s,",service("openclash","^luci-app-openclash$"))
- printf "\"lucky\":%s,",service("lucky","^(lucky|luci-app-lucky)$"))
- printf "\"adguardhome\":%s,",service("adguardhome","^adguardhome$"))
- printf "\"docker\":%s},",service("docker","^(docker|dockerd)$"))
+ printf "\"openclash\":%s,",service("openclash","^luci-app-openclash$")
+ printf "\"lucky\":%s,",service("lucky","^(lucky|luci-app-lucky)$")
+ printf "\"adguardhome\":%s,",service("adguardhome","^adguardhome$")
+ printf "\"docker\":%s},",service("docker","^(docker|dockerd)$")
  printf "\"storage\":{\"docker_root\":null,\"mounts\":[],\"warnings\":[\"Docker Root Dir and persistent mounts not verified; do not assume rootfs persistence\"]},"
  printf "\"warnings\":[\"top-level provenance is not authoritative; retain unknown packages for manual review\",\"boot/profile and mount inspection may be incomplete\"],\"errors\":[]}"
 }
