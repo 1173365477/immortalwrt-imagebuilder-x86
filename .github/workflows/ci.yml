@@ -32,6 +32,15 @@ jobs:
           sudo apt-get install --yes shellcheck
           python -m pip install --requirement requirements-dev.txt
 
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: "1.7.7"
+        run: go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"
+
+      - name: Validate GitHub Actions semantics
+        run: |
+          "$(go env GOPATH)/bin/actionlint" -color
+
       - name: Validate YAML and Python syntax
         run: |
           set -euo pipefail
@@ -49,7 +58,7 @@ jobs:
       - name: Run ShellCheck
         run: |
           shellcheck -x scripts/build-image.sh files/etc/uci-defaults/99-install-thirdparty
-          shellcheck -s sh scripts/smart-upgrade-agent.sh
+          shellcheck -s sh scripts/smart-upgrade-agent.sh scripts/smart-upgrade-storage.sh
 
       - name: Run unit and future-release fixture tests
         run: pytest -q

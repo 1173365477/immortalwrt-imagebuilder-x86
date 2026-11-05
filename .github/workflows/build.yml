@@ -165,6 +165,7 @@ jobs:
             generated/packages-missing.txt
             generated/packages-skipped.txt
             generated/packages-replaced.txt
+            generated/package-decisions.json
             generated/release-capabilities.json
             generated/official-package-index.json
             generated/thirdparty-status.json

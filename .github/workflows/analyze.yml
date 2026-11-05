@@ -101,5 +101,6 @@ jobs:
             generated/packages-skipped.txt
             generated/packages-replaced.txt
             generated/migration-report.md
+            generated/package-decisions.json
             generated/final-packages.txt
 
