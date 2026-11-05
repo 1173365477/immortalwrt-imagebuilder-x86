@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "status",
+    "target_version",
+    "artifacts",
+    "blockers"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "status": {
+      "enum": [
+        "ok",
+        "partial",
+        "blocked",
+        "failed",
+        "unknown"
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "target_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "plan_digest": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "sha256"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{64}$"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "build_sha": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "$id": "https://github.com/1173365477/immortalwrt-imagebuilder-x86/schemas/build-result-v1.json"
+}
