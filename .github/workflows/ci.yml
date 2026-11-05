@@ -6,6 +6,7 @@ on:
       - main
       - feature/generic-release-support
       - feature/latest-stable-build
+      - feature/smart-upgrade-*
   pull_request:
 
 permissions:
@@ -55,9 +56,9 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/parse-owut-report.py \
-            --report reports/current-system.txt.example \
-            --installed reports/installed-packages.txt.example \
-            --top-level reports/top-level-packages.txt.example
+            --report reports/current-system.txt \
+            --installed reports/installed-packages.txt \
+            --top-level reports/top-level-packages.txt
           python scripts/resolve-packages.py \
             --include-openclash true \
             --include-nikki true \
