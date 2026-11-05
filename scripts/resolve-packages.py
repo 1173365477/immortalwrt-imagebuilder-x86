@@ -115,6 +115,10 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
     official: set[str] = {item for item in base if not item.startswith("-")}
     removals: set[str] = {item for item in base if item.startswith("-")}
     missing: set[str] = set()
+    # Missing top-level provenance must block strict migration rather than silently
+    # treating the unknown package set as removable dependencies.
+    if installed and not primary:
+        missing.add("unknown-provenance\ttop-level/user-installed manifest empty; manual package classification required")
     skipped: set[str] = set()
     replaced: set[str] = set()
     thirdparty: set[str] = set()
