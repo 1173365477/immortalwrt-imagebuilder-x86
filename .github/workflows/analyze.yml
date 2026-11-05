@@ -84,7 +84,9 @@ jobs:
         run: |
           for file in generated/packages-official.txt generated/packages-thirdparty.txt generated/packages-missing.txt generated/packages-skipped.txt generated/packages-replaced.txt; do
             echo "===== $file ====="
-            [[ -f "$file" ]] && cat "$file" || true
+            if [[ -f "$file" ]]; then
+              cat "$file"
+            fi
           done
 
       - name: Upload migration analysis
