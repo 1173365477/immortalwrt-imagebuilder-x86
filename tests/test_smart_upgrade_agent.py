@@ -12,8 +12,9 @@ SCHEMA = json.loads((ROOT / "schemas/system-snapshot-v1.json").read_text())
 def scan(root, privacy="redacted"):
     run = subprocess.run(
         ["sh", str(ROOT / "scripts/smart-upgrade-agent.sh"), "--root", str(root), "--privacy", privacy],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=False,
     )
+    assert run.returncode == 0, run.stderr
     result = json.loads(run.stdout)
     Draft202012Validator(SCHEMA).validate(result)
     return result
