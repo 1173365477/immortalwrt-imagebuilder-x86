@@ -90,6 +90,7 @@ function apk(  line) {
 function exists(path,  line,x){x=(getline line < path);close(path);return x>=0}
 function service(name,pattern,   result) {
  result="not_detected"
+ if(manager=="unknown") return q("unknown")
  for(z=1;z<=count;z++) if(names[z]~pattern)result="detected"
  return q(result)
 }
@@ -166,6 +167,8 @@ BEGIN {
  printf "\"adguardhome\":%s,",service("adguardhome","^adguardhome$")
  printf "\"docker\":%s},",service("docker","^(docker|dockerd)$")
  render_storage()
- printf "\"warnings\":[\"top-level provenance is not authoritative; retain unknown packages for manual review\",\"boot/profile and mount inspection may be incomplete\"],\"errors\":[]}"
+ printf "\"warnings\":[\"top-level provenance is not authoritative; retain unknown packages for manual review\",\"boot/profile and mount inspection may be incomplete\""
+ if(manager=="unknown")printf ",\"package database unavailable; services cannot be classified\""
+ printf "],\"errors\":[]}"
 }
 ' /dev/null
