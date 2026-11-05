@@ -23,22 +23,6 @@ if [ -n "$FIXTURE_DIR" ] && [ ! -d "$FIXTURE_DIR" ]; then
 fi
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 export ROOT PRIVACY FIXTURE_DIR
-SOURCE_DIGEST=$(
-  for evidence_spec in \
-    "openwrt_release|$ROOT/etc/openwrt_release" "os_release|$ROOT/etc/os-release" \
-    "opkg_status|$ROOT/usr/lib/opkg/status" "apk_installed|$ROOT/lib/apk/db/installed" \
-    "apk_world|$ROOT/etc/apk/world" "package_origins|$ROOT/rom/usr/share/smart-upgrade/package-origins.tsv" \
-    "mountinfo|$ROOT/proc/self/mountinfo"; do
-    evidence_label=${evidence_spec%%|*}
-    evidence_file=${evidence_spec#*|}
-    if [ -r "$evidence_file" ]; then
-      evidence_hash=$(sha256sum "$evidence_file" | awk '{print $1}')
-      printf '%s:%s\n' "$evidence_label" "$evidence_hash"
-    else
-      printf '%s:missing\n' "$evidence_label"
-    fi
-  done | sha256sum | awk '{print $1}'
-)
 UBUS_BOARD=""; UNAME_M=""; PACKAGE_ARCH=""; BOOT_OVERRIDE=""
 if [ -n "$FIXTURE_DIR" ]; then
   [ ! -r "$FIXTURE_DIR/ubus-system-board.json" ] || UBUS_BOARD=$(sed -n '1,80p' "$FIXTURE_DIR/ubus-system-board.json")
@@ -68,8 +52,32 @@ elif [ "$ROOT" = / ] && command -v ubus >/dev/null 2>&1; then
 }${service_name}	${state}"
   done
 fi
-# Only reads explicitly enumerated OS and package database paths; never shells out to
-# data from those files, contacts the Docker socket, or sources device config.
+STORAGE_EVIDENCE_DIGEST=$(printf '%s\n' "$STORAGE_JSON" | sed -n 's/.*"evidence_digest":"\([a-f0-9]\{64\}\)".*/\1/p')
+[ -n "$STORAGE_EVIDENCE_DIGEST" ] || { echo "storage evidence digest missing" >&2; exit 1; }
+SOURCE_DIGEST=$(
+  {
+    for evidence_spec in \
+      "openwrt_release|$ROOT/etc/openwrt_release" "os_release|$ROOT/etc/os-release" \
+      "opkg_status|$ROOT/usr/lib/opkg/status" "apk_installed|$ROOT/lib/apk/db/installed" \
+      "apk_world|$ROOT/etc/apk/world" "package_origins|$ROOT/rom/usr/share/smart-upgrade/package-origins.tsv"; do
+      evidence_label=${evidence_spec%%|*}
+      evidence_file=${evidence_spec#*|}
+      if [ -r "$evidence_file" ]; then
+        evidence_hash=$(sha256sum "$evidence_file" | awk '{print $1}')
+        printf '%s:%s\n' "$evidence_label" "$evidence_hash"
+      else
+        printf '%s:missing\n' "$evidence_label"
+      fi
+    done
+    printf 'storage_evidence:%s\n' "$STORAGE_EVIDENCE_DIGEST"
+    printf 'kernel_architecture:%s\npackage_architecture:%s\nboot_evidence:%s\n' "$UNAME_M" "$PACKAGE_ARCH" "$BOOT_OVERRIDE"
+    printf 'ubus_board:%s\n' "$(printf '%s' "$UBUS_BOARD" | sha256sum | awk '{print $1}')"
+    if [ -r "$ROOT/sys/firmware/efi/systab" ]; then printf 'efi_systab:present\n'; else printf 'efi_systab:missing\n'; fi
+    printf 'service_rows:%s\n' "$(printf '%s' "$SERVICE_ROWS" | sha256sum | awk '{print $1}')"
+  } | sha256sum | awk '{print $1}'
+)
+# The renderer only reads enumerated evidence and never evaluates device data.
+# The storage helper may query Docker through fixed, read-only templates as root.
 awk -v root="$ROOT" -v privacy="$PRIVACY" -v storage_json="$STORAGE_JSON" -v service_rows="$SERVICE_ROWS" \
   -v source_digest="$SOURCE_DIGEST" -v ubus_board="$UBUS_BOARD" -v uname_m="$UNAME_M" \
   -v package_arch="$PACKAGE_ARCH" -v boot_override="$BOOT_OVERRIDE" '
@@ -113,7 +121,6 @@ function identity(  fn,line,a,dash) {
  boot="unknown"
  if(boot_override~/^(efi|bios|unknown)$/)boot=boot_override
  else if(exists(root "/sys/firmware/efi/systab"))boot="efi"
- else if((target~/^x86\//||uname_m~/^(x86_64|i[3-6]86)$/) && exists(root "/sys/class/dmi/id/bios_vendor"))boot="bios"
  if(image_type=="")image_type="unknown"
  identity_ok=1;identity_errors=""
  if(target~/^x86\/64$/ && uname_m!="" && uname_m!="x86_64"){identity_ok=0;identity_errors="target_uname_arch_mismatch"}
@@ -255,7 +262,7 @@ BEGIN {
  manager="unknown"
  if(exists(root "/usr/lib/opkg/status"))manager="opkg"
  else if(exists(root "/lib/apk/db/installed"))manager="apk"
- printf "{\"schema_version\":\"1.0.0\",\"snapshot_id\":%s,\"digest\":{\"algorithm\":\"sha256\",\"canonicalization\":\"evidence-sha256-v1\",\"value\":%s},\"status\":\"partial\",\"privacy_mode\":%s,",q("urn:sha256:" source_digest),q(source_digest),q(privacy)
+ printf "{\"schema_version\":\"1.0.0\",\"snapshot_id\":%s,\"digest\":{\"algorithm\":\"sha256\",\"canonicalization\":\"evidence-sha256-v2\",\"value\":%s},\"status\":\"partial\",\"privacy_mode\":%s,",q("urn:sha256:" source_digest),q(source_digest),q(privacy)
  printf "\"system\":{\"distribution\":%s,\"version\":%s,\"target\":%s,\"profile\":%s,\"architecture\":%s,\"package_architecture\":%s,\"kernel_architecture\":%s,\"boot_mode\":%s,\"rootfs_type\":%s,\"firmware_image_type\":%s,\"package_manager\":%s,\"identity_status\":%s,\"identity_errors\":[",q(distro),version==""?"null":q(version),target==""?"null":q(target),profile==""?"null":q(profile),arch==""?"null":q(arch),package_arch==""?"null":q(package_arch),uname_m==""?"null":q(uname_m),q(boot),q(rootfs),q(image_type),q(manager),q(identity_ok?"consistent":"conflict")
  ne=split(identity_errors,ie,",");for(i=1;i<=ne;i++)if(ie[i]!=""){if(i>1)printf ",";printf "%s",q(ie[i])}printf "]},"
  printf "\"packages\":{\"installed\":["

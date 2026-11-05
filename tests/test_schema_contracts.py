@@ -19,12 +19,12 @@ def validator(name):
 
 VALID_SYSTEM = {
     "schema_version": "1.0.0", "snapshot_id": URN,
-    "digest": {"algorithm": "sha256", "canonicalization": "evidence-sha256-v1", "value": HEX},
+    "digest": {"algorithm": "sha256", "canonicalization": "evidence-sha256-v2", "value": HEX},
     "status": "partial", "privacy_mode": "redacted",
     "system": {"distribution": "ImmortalWrt", "version": "25.12.2", "target": "x86/64", "profile": "generic", "architecture": "x86_64", "package_architecture": "x86_64", "kernel_architecture": "x86_64", "boot_mode": "unknown", "rootfs_type": "overlay", "firmware_image_type": "unknown", "package_manager": "apk", "identity_status": "consistent", "identity_errors": []},
     "packages": {"installed": [{"name": "busybox", "version": "1", "origin": "official", "install_reason": "system_default", "confidence": "high", "evidence": ["firmware-rom-baseline"], "dependencies_raw": None, "depends": [], "provides_raw": None}], "top_level": [], "intent_candidates": [], "classification_status": "partial", "truncated": False},
     "services": {name: {"package_detected": None, "executable_exists": False, "service_definition_exists": False, "running": "unknown"} for name in ("openclash", "lucky", "adguardhome", "docker")},
-    "storage": {"status": "partial", "docker": {"installed": False, "daemon_state": "unavailable", "root": None, "configured_root": None, "root_source": "none", "verified": False, "config_mismatch": False}, "mount_inventory": {"state": "complete", "truncated": False, "entries": [{"id": "mount-1", "mountpoint": None, "device": None, "device_major_minor": None, "filesystem": "overlay", "root": None, "block_resolution": "unknown", "size_bytes": None, "risk": "rootfs_or_overlay"}]}, "targets": [], "errors": []},
+    "storage": {"status": "partial", "evidence_digest": HEX, "scan_completeness": {"containers": "unavailable", "volumes": "unavailable", "mounts": "unavailable", "container_scope": "unknown", "volume_scope": "unknown"}, "docker": {"installed": False, "daemon_state": "unavailable", "root": None, "configured_root": None, "root_source": "none", "verified": False, "config_mismatch": False}, "mount_inventory": {"state": "complete", "truncated": False, "entries": [{"id": "mount-1", "mountpoint": None, "device": None, "device_major_minor": None, "filesystem": "overlay", "root": None, "block_resolution": "unknown", "size_bytes": None, "risk": "rootfs_or_overlay", "physical_disk_id": None, "physical_disk": None, "partition": None}]}, "targets": [], "errors": []},
     "warnings": ["classification incomplete"], "errors": []
 }
 
@@ -56,6 +56,28 @@ def test_schema_positive_samples(schema, sample):
 def test_redacted_snapshot_rejects_local_paths():
     sample = copy.deepcopy(VALID_SYSTEM)
     sample["storage"]["mount_inventory"]["entries"][0]["mountpoint"] = "/"
+    with pytest.raises(ValidationError):
+        validator("system-snapshot-v1.json").validate(sample)
+
+
+def test_storage_contract_rejects_implicit_upgrade_safety_or_missing_completeness():
+    sample = copy.deepcopy(VALID_SYSTEM)
+    del sample["storage"]["scan_completeness"]
+    with pytest.raises(ValidationError):
+        validator("system-snapshot-v1.json").validate(sample)
+
+    sample = copy.deepcopy(VALID_SYSTEM)
+    sample["storage"]["status"] = "ok"
+    sample["storage"]["docker"]["installed"] = True
+    with pytest.raises(ValidationError):
+        validator("system-snapshot-v1.json").validate(sample)
+
+    sample = copy.deepcopy(VALID_SYSTEM)
+    sample["storage"]["targets"] = [{
+        "kind": "docker_root", "source": None, "destination": None, "name": None,
+        "mount_id": "mount-1", "risk": "external_persistent", "persistence": "separate_mount",
+        "firmware_overwrite_risk": "safe", "verified": True,
+    }]
     with pytest.raises(ValidationError):
         validator("system-snapshot-v1.json").validate(sample)
 

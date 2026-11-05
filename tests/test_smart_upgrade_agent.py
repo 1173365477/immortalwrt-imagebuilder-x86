@@ -290,3 +290,132 @@ def test_third_party_origin_requires_read_only_rom_manifest_evidence(tmp_path):
     assert packages["vendor-addon"]["origin"] == "third_party"
     assert packages["vendor-addon"]["confidence"] == "high"
     assert packages["unproven-addon"]["origin"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("data_device", "topology", "expected_risk"),
+    [
+        ("/dev/sda3", "8:2\tsda\t2\n8:3\tsda\t3\n", "same_physical_disk"),
+        ("/dev/sdb1", "8:2\tsda\t2\n8:17\tsdb\t1\n", "different_physical_disk"),
+    ],
+)
+def test_separate_partition_does_not_imply_firmware_overwrite_safety(
+    tmp_path, data_device, topology, expected_risk
+):
+    data_major_minor = "8:3" if data_device == "/dev/sda3" else "8:17"
+    fixture = _storage_fixture(
+        tmp_path,
+        docker_root="/data/docker",
+        mounts=(
+            "25 1 8:2 / / rw - ext4 /dev/sda2 rw\n"
+            f"26 1 {data_major_minor} / /data rw - ext4 {data_device} rw\n"
+        ),
+    )
+    (fixture / "docker-container-mounts.tsv").write_text("")
+    (fixture / "docker-volumes.tsv").write_text("")
+    (fixture / "block-topology.tsv").write_text(topology)
+    report = scan(tmp_path, "local", fixture)
+    docker_root = next(item for item in report["storage"]["targets"] if item["kind"] == "docker_root")
+    assert docker_root["persistence"] == "separate_mount"
+    assert docker_root["firmware_overwrite_risk"] == expected_risk
+    assert "safe" not in json.dumps(docker_root).lower()
+
+
+def test_all_container_states_and_unused_volumes_are_in_scan_scope(tmp_path):
+    fixture = _storage_fixture(
+        tmp_path,
+        docker_root="/data/docker",
+        mounts=(
+            "25 1 8:2 / / rw - ext4 /dev/sda2 rw\n"
+            "26 1 8:17 / /data rw - ext4 /dev/sdb1 rw\n"
+        ),
+    )
+    # This fixture represents the result of `docker ps -aq`, including a stopped container.
+    (fixture / "docker-container-mounts.tsv").write_text(
+        "bind\t/data/stopped-container\t/archive\t\n"
+    )
+    # The volume is intentionally absent from container mounts: it is discovered by volume inventory.
+    (fixture / "docker-volumes.tsv").write_text("orphaned\t/data/docker/volumes/orphaned/_data\n")
+    (fixture / "block-topology.tsv").write_text("8:2\tsda\t2\n8:17\tsdb\t1\n")
+    report = scan(tmp_path, "local", fixture)
+    completeness = report["storage"]["scan_completeness"]
+    assert completeness["container_scope"] == "all"
+    assert completeness["volume_scope"] == "all"
+    assert any(item["source"] == "/data/stopped-container" for item in report["storage"]["targets"])
+    assert any(item["kind"] == "volume" and item["name"] == "orphaned" for item in report["storage"]["targets"])
+
+
+@pytest.mark.parametrize(
+    ("marker", "error"),
+    [
+        ("docker-containers_truncated", "docker_containers_truncated"),
+        ("docker-container_inspect_failed", "docker_container_inspect_failed"),
+        ("docker-volume_query_failed", "docker_volume_query_failed"),
+    ],
+)
+def test_incomplete_docker_enumeration_is_explicitly_partial(tmp_path, marker, error):
+    fixture = _storage_fixture(tmp_path)
+    (fixture / "docker-container-mounts.tsv").write_text("")
+    (fixture / "docker-volumes.tsv").write_text("")
+    (fixture / marker).write_text("")
+    report = scan(tmp_path, "local", fixture)
+    assert report["storage"]["status"] == "partial"
+    assert report["storage"]["scan_completeness"]["mounts"] == "partial"
+    assert error in report["storage"]["errors"]
+
+
+def test_bind_source_symlink_is_resolved_before_longest_mount_match(tmp_path):
+    (tmp_path / "data-real/media").mkdir(parents=True)
+    (tmp_path / "media-link").symlink_to(tmp_path / "data-real/media")
+    fixture = _storage_fixture(
+        tmp_path,
+        mounts=(
+            "25 1 8:2 / / rw - ext4 /dev/sda2 rw\n"
+            "26 1 8:17 / /data-real rw - ext4 /dev/sdb1 rw\n"
+        ),
+    )
+    (fixture / "docker-container-mounts.tsv").write_text("bind\t/media-link\t/media\t\n")
+    (fixture / "docker-volumes.tsv").write_text("")
+    (fixture / "block-topology.tsv").write_text("8:2\tsda\t2\n8:17\tsdb\t1\n")
+    report = scan(tmp_path, "local", fixture)
+    bind = next(item for item in report["storage"]["targets"] if item["kind"] == "bind")
+    assert bind["source"] == "/data-real/media"
+    assert bind["mount_id"] == "mount-2"
+
+
+def test_snapshot_id_changes_with_dynamic_storage_and_identity_evidence(tmp_path):
+    fixture = _storage_fixture(tmp_path, docker_root="/data/docker")
+    (fixture / "docker-container-mounts.tsv").write_text("")
+    (fixture / "docker-volumes.tsv").write_text("")
+    (fixture / "uname.txt").write_text("x86_64\n")
+    first = scan(tmp_path, "local", fixture)
+    redacted = scan(tmp_path, "redacted", fixture)
+    assert first["snapshot_id"] == redacted["snapshot_id"]
+
+    (fixture / "docker-info.txt").write_text("/other/docker\n")
+    storage_changed = scan(tmp_path, "local", fixture)
+    assert storage_changed["snapshot_id"] != first["snapshot_id"]
+
+    (fixture / "docker-info.txt").write_text("/data/docker\n")
+    (fixture / "uname.txt").write_text("aarch64\n")
+    identity_changed = scan(tmp_path, "local", fixture)
+    assert identity_changed["snapshot_id"] != first["snapshot_id"]
+
+
+def test_dmi_vendor_is_not_legacy_bios_evidence(tmp_path):
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc/openwrt_release").write_text(
+        "DISTRIB_ID='ImmortalWrt'\nDISTRIB_TARGET='x86/64'\nDISTRIB_ARCH='x86_64'\n"
+    )
+    bios_vendor = tmp_path / "sys/class/dmi/id/bios_vendor"
+    bios_vendor.parent.mkdir(parents=True)
+    bios_vendor.write_text("Example Vendor\n")
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "uname.txt").write_text("x86_64\n")
+    report = scan(tmp_path, fixture_dir=fixture)
+    assert report["system"]["boot_mode"] == "unknown"
+
+    (fixture / "boot-mode.txt").write_text("bios\n")
+    explicitly_proven = scan(tmp_path, fixture_dir=fixture)
+    assert explicitly_proven["system"]["boot_mode"] == "bios"
