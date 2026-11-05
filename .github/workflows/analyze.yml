@@ -3,6 +3,11 @@ name: Analyze migration report
 on:
   workflow_dispatch:
     inputs:
+      immortalwrt_version:
+        description: Exact ImmortalWrt target release (for example 25.12.2)
+        required: true
+        default: 25.12.2
+        type: string
       report_path:
         description: Path to the complete owut check output
         required: true
@@ -66,10 +71,11 @@ jobs:
 
       - name: Validate manifest
         env:
+          VERSION: ${{ inputs.immortalwrt_version }}
           STRICT_MODE: ${{ inputs.strict_mode }}
         run: |
           set -euo pipefail
-          args=(--version 25.12.2)
+          args=(--version "$VERSION")
           [[ "$STRICT_MODE" == "true" ]] && args+=(--strict)
           python scripts/validate-manifest.py "${args[@]}"
 

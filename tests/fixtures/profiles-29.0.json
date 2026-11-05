@@ -1,0 +1,30 @@
+{
+  "_fixture": "synthetic; not an actual ImmortalWrt release",
+  "arch_packages": "x86_64",
+  "default_packages": ["apk-openssl", "base-files", "firewall4"],
+  "linux_kernel": {
+    "version": "7.2.0",
+    "release": "1",
+    "vermagic": "synthetic-vermagic"
+  },
+  "target": "x86/64",
+  "version_number": "29.0.1",
+  "profiles": {
+    "generic": {
+      "images": [
+        {
+          "filesystem": "ext4",
+          "type": "combined-efi",
+          "name": "immortalwrt-29.0.1-x86-64-generic-ext4-combined-efi.img.gz",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "filesystem": "squashfs",
+          "type": "combined",
+          "name": "immortalwrt-29.0.1-x86-64-generic-squashfs-combined.img.gz"
+        }
+      ]
+    }
+  }
+}
+

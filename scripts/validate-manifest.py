@@ -6,11 +6,20 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
-import urllib.request
 from pathlib import Path
+from typing import Callable
 
 import yaml
+
+from release_utils import (
+    ReleaseValidationError,
+    build_kmod_index_url,
+    discover_feed_names,
+    discover_release,
+    get_url,
+    parse_version,
+    versions_equal,
+)
 
 
 PACKAGE_RE = re.compile(r"^-?[A-Za-z0-9][A-Za-z0-9+_.@-]*$")
@@ -22,14 +31,12 @@ def lines(path: Path) -> list[str]:
     return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
 
 
-def get_url(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "immortalwrt-migration-builder/1"})
-    with urllib.request.urlopen(request, timeout=45) as response:
-        return response.read()
-
-
-def validate(args: argparse.Namespace) -> list[str]:
+def validate(args: argparse.Namespace, fetch: Callable[[str], bytes] = get_url) -> list[str]:
     errors: list[str] = []
+    try:
+        parse_version(args.version)
+    except ReleaseValidationError as exc:
+        return [str(exc)]
     official = lines(args.generated / "packages-official.txt")
     thirdparty = lines(args.generated / "packages-thirdparty.txt")
     missing = lines(args.generated / "packages-missing.txt")
@@ -58,58 +65,58 @@ def validate(args: argparse.Namespace) -> list[str]:
         if not PACKAGE_RE.fullmatch(package):
             errors.append(f"invalid third-party package name: {package}")
 
-    expected = {
+    expected: dict[str, str] = {
         "target": "x86/64",
         "profile": "generic",
         "rootfs_type": "ext4",
     }
     for key, value in expected.items():
         actual = analysis.get(key)
-        if actual and actual.lower() != value.lower():
+        if not actual:
+            errors.append(f"migration report is missing required field: {key}")
+        elif str(actual).lower() != value.lower():
             errors.append(f"report {key} is {actual!r}; expected {value!r}")
     report_target = analysis.get("target_version")
-    if report_target and not str(report_target).startswith("25.12"):
-        errors.append(f"owut report target version is {report_target!r}, not 25.12.x")
+    if not report_target:
+        errors.append("migration report is missing required field: target_version")
+    elif not versions_equal(str(report_target), args.version):
+        errors.append(
+            "Migration report target version does not match requested build version: "
+            f"report={report_target!r}, requested={args.version!r}."
+        )
 
     if args.strict and missing:
         errors.append(f"strict mode: {len(missing)} unresolved package(s) remain")
 
     if args.online:
-        base = f"https://downloads.immortalwrt.org/releases/{args.version}/targets/x86/64"
         try:
-            profiles = json.loads(get_url(f"{base}/profiles.json"))
-            if profiles.get("target") != "x86/64" or "generic" not in profiles.get("profiles", {}):
-                errors.append("official profiles.json does not contain x86/64 PROFILE=generic")
-            images = profiles.get("profiles", {}).get("generic", {}).get("images", [])
-            wanted = [
-                image for image in images
-                if image.get("filesystem") == "ext4" and image.get("type") == "combined-efi" and image.get("name", "").endswith(".img.gz")
-            ]
-            if not wanted:
-                errors.append("profiles.json lacks the generic ext4 combined-efi .img.gz image")
-            sums = get_url(f"{base}/sha256sums").decode("utf-8", errors="replace")
-            imagebuilder = f"immortalwrt-imagebuilder-{args.version}-x86-64.Linux-x86_64.tar.zst"
-            if not re.search(rf"^[0-9a-f]{{64}} \*{re.escape(imagebuilder)}$", sums, re.MULTILINE):
-                errors.append(f"sha256sums lacks {imagebuilder}")
-
-            kernel = profiles.get("linux_kernel", {})
-            kmod_dir = f"{kernel.get('version')}-{kernel.get('release')}-{kernel.get('vermagic')}"
+            capabilities, profiles = discover_release(args.version, fetch=fetch)
+            arch = capabilities["arch"]
+            package_root = f"https://downloads.immortalwrt.org/releases/{args.version}/packages/{arch}"
+            package_sums = fetch(f"{package_root}/sha256sums").decode("utf-8")
+            feeds = discover_feed_names(package_sums)
             index_urls = [
-                f"{base}/packages/index.json",
-                f"{base}/kmods/{kmod_dir}/index.json",
-                *(
-                    f"https://downloads.immortalwrt.org/releases/{args.version}/packages/x86_64/{feed}/index.json"
-                    for feed in ("base", "luci", "packages", "routing", "telephony")
-                ),
+                f"{capabilities['base_url']}/packages/index.json",
+                build_kmod_index_url(capabilities["base_url"], profiles),
+                *(f"{package_root}/{feed}/index.json" for feed in feeds),
             ]
-            available: set[str] = set()
+            available: dict[str, str] = {}
             for index_url in index_urls:
-                index = json.loads(get_url(index_url))
-                available.update(index.get("packages", {}).keys())
-            unavailable = sorted(positive - available)
+                index = json.loads(fetch(index_url))
+                available.update(index.get("packages", {}))
+            unavailable = sorted(positive - set(available))
             if unavailable:
                 errors.append(f"official package index has no entry for: {', '.join(unavailable)}")
-        except Exception as exc:  # network errors must fail validation in online mode
+            capabilities["feed_names"] = feeds
+            capabilities["package_index_urls"] = index_urls
+            capabilities["official_package_count"] = len(available)
+            (args.generated / "release-capabilities.json").write_text(
+                json.dumps(capabilities, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            (args.generated / "official-package-index.json").write_text(
+                json.dumps(available, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        except (ReleaseValidationError, KeyError, json.JSONDecodeError) as exc:
             errors.append(f"official metadata verification failed: {exc}")
 
     # This is the exact whitespace-separated PACKAGES value consumed by ImageBuilder.

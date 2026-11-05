@@ -1,0 +1,16 @@
+# Synthetic fixture. ImmortalWrt 29.0.1 does not need to exist for this test.
+Target         x86/64
+Profile        generic (x86/64)
+Package-arch   x86_64
+Root-FS-type   ext4
+Image-type     combined-efi
+Version-from   28.4.3 r99999-synthetic (kernel 7.1.0)
+Version-to     29.0.1 r100000-synthetic (kernel 7.2.0)
+Installed       10 packages
+Top-level        4 packages
+User-installed   3 packages (top-level only)
+
+Package version changes:
+  future-tool                   1.0-r1                 2.0-r1                 (upgrade)
+  future-missing                1.0-r1                                        missing to-version
+

@@ -1,5 +1,10 @@
-replacements:
-  opkg: apk-openssl
+replacements: {}
+
+# Fallback only. Replacement metadata emitted by the current owut report wins.
+version_rules:
+  "25.12":
+    replacements:
+      opkg: apk-openssl
 
 ignore:
   - libatomic

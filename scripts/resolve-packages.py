@@ -11,6 +11,8 @@ from typing import Any
 
 import yaml
 
+from release_utils import ReleaseValidationError, parse_version
+
 
 VALID_PACKAGE = re.compile(r"^-?[A-Za-z0-9][A-Za-z0-9+_.@-]*$")
 
@@ -80,6 +82,11 @@ def render_report(analysis: dict[str, Any], resolved: dict[str, Any]) -> str:
     lines += block("Downgrade warnings", downgrade_rows)
     lines += block("owut warnings", [str(item) for item in analysis.get("warnings", [])])
     lines += block("owut errors / build failures", [str(item) for item in analysis.get("errors", [])])
+    missing_fields = [
+        field for field in ("source_version", "target_version", "target", "profile", "rootfs_type", "sys_type")
+        if not analysis.get(field)
+    ]
+    lines += block("Missing report fields", [f"{field}: unknown" for field in missing_fields])
     if analysis.get("sensitive_input_warning"):
         lines += [
             "## Sensitive-input warning",
@@ -114,7 +121,15 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
     features: list[str] = []
     provider_requests: set[str] = set()
 
-    replacements = rules.get("replacements", {})
+    replacements = dict(rules.get("replacements", {}))
+    try:
+        target_series = parse_version(str(analysis.get("target_version", ""))).target_series
+    except ReleaseValidationError:
+        target_series = None
+    if target_series:
+        replacements.update(
+            rules.get("version_rules", {}).get(target_series, {}).get("replacements", {})
+        )
     ignore = set(rules.get("ignore", []))
     ignore_prefixes = tuple(rules.get("ignore_prefixes", []))
     never_downgrade = set(rules.get("never_downgrade", []))
@@ -144,6 +159,16 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
             removals.add(f"-{package}")
             skipped.add(f"{package}\tremoved because a conflicting replacement is selected")
             continue
+        # The current owut report is authoritative. Static rules only fill gaps
+        # when owut did not emit replacement metadata.
+        if status in {"replacement", "removed"}:
+            target = details.get("to")
+            if target and VALID_PACKAGE.fullmatch(target):
+                official.add(target)
+                replaced.add(f"{package} -> {target}\towut replacement")
+            else:
+                skipped.add(f"{package}\tremoved/replaced by target defaults")
+            continue
         if package in replacements:
             target = replacements[package]
             official.add(target)
@@ -166,14 +191,6 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
             reason = "downgrade blocked by never_downgrade rule" if package in never_downgrade else "downgrade requires explicit user review"
             missing.add(f"{package}\t{reason}: {details.get('from')} -> {details.get('to')}")
             continue
-        if status in {"replacement", "removed"}:
-            target = details.get("to")
-            if target and VALID_PACKAGE.fullmatch(target):
-                official.add(target)
-                replaced.add(f"{package} -> {target}\towut replacement")
-            else:
-                skipped.add(f"{package}\tremoved/replaced by target defaults")
-            continue
         if package.startswith("kmod-") and not any(pattern.fullmatch(package) for pattern in kernel_patterns):
             skipped.add(f"{package}\told kernel module not on the functional/hardware allowlist")
             continue
@@ -183,7 +200,7 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
     # to record, but only their target package is selected.
     for package, details in analysis.get("packages", {}).items():
         if details.get("status") == "replacement":
-            target = replacements.get(package) or details.get("to")
+            target = details.get("to") or replacements.get(package)
             if target and VALID_PACKAGE.fullmatch(target):
                 official.add(target)
                 replaced.add(f"{package} -> {target}\tpackage-manager/owut replacement")
