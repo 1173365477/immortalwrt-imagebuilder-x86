@@ -104,3 +104,9 @@ def test_rom_default_and_missing_apk_world_are_not_assumed_manual(tmp_path):
     assert source["unsigned-addon"] == "unknown"
     assert report["packages"]["top_level"] == []
     assert report["packages"]["classification_status"] == "unknown"
+
+def test_missing_package_database_does_not_report_service_absence(tmp_path):
+    report = scan(tmp_path)
+    assert report["system"]["package_manager"] == "unknown"
+    assert report["services"]["docker"] == "unknown"
+    assert any("package database unavailable" in w for w in report["warnings"])
