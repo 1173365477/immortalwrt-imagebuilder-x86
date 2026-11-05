@@ -47,7 +47,8 @@ jobs:
           PY
 
       - name: Run ShellCheck
-        run: shellcheck -x scripts/build-image.sh files/etc/uci-defaults/99-install-thirdparty
+        run: |
+          shellcheck -x scripts/build-image.sh files/etc/uci-defaults/99-install-thirdparty
           shellcheck -s sh scripts/smart-upgrade-agent.sh
 
       - name: Run unit and future-release fixture tests
