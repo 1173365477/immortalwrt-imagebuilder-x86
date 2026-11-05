@@ -24,11 +24,19 @@ fi
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 export ROOT PRIVACY FIXTURE_DIR
 SOURCE_DIGEST=$(
-  for evidence_file in \
-    "$ROOT/etc/openwrt_release" "$ROOT/etc/os-release" \
-    "$ROOT/usr/lib/opkg/status" "$ROOT/lib/apk/db/installed" \
-    "$ROOT/etc/apk/world" "$ROOT/proc/self/mountinfo"; do
-    [ -r "$evidence_file" ] && sha256sum "$evidence_file" | awk '{print $1}'
+  for evidence_spec in \
+    "openwrt_release|$ROOT/etc/openwrt_release" "os_release|$ROOT/etc/os-release" \
+    "opkg_status|$ROOT/usr/lib/opkg/status" "apk_installed|$ROOT/lib/apk/db/installed" \
+    "apk_world|$ROOT/etc/apk/world" "package_origins|$ROOT/rom/usr/share/smart-upgrade/package-origins.tsv" \
+    "mountinfo|$ROOT/proc/self/mountinfo"; do
+    evidence_label=${evidence_spec%%|*}
+    evidence_file=${evidence_spec#*|}
+    if [ -r "$evidence_file" ]; then
+      evidence_hash=$(sha256sum "$evidence_file" | awk '{print $1}')
+      printf '%s:%s\n' "$evidence_label" "$evidence_hash"
+    else
+      printf '%s:missing\n' "$evidence_label"
+    fi
   done | sha256sum | awk '{print $1}'
 )
 UBUS_BOARD=""; UNAME_M=""; PACKAGE_ARCH=""; BOOT_OVERRIDE=""
@@ -111,7 +119,7 @@ function identity(  fn,line,a,dash) {
  if(target~/^x86\/64$/ && uname_m!="" && uname_m!="x86_64"){identity_ok=0;identity_errors="target_uname_arch_mismatch"}
  if(arch!=""&&package_arch!=""&&arch!=package_arch){identity_ok=0;identity_errors=identity_errors (identity_errors!=""?",":"") "release_package_arch_mismatch"}
 }
-function read_provenance(  fn,line,p) {
+function read_provenance(  fn,line,p,a) {
  fn=root "/etc/apk/world"
  while ((getline line < fn)>0) {
    sub(/[[:space:]<>=~].*$/, "", line)
@@ -124,6 +132,12 @@ function read_provenance(  fn,line,p) {
  fn=root "/rom/lib/apk/db/installed"
  while ((getline line < fn)>0) if(line~/^P:/)rom[substr(line,3)]=1
  close(fn)
+ fn=root "/rom/usr/share/smart-upgrade/package-origins.tsv"
+ while ((getline line < fn)>0) {
+   split(line,a,"\t")
+   if(a[1]~/^[A-Za-z0-9][A-Za-z0-9+_.@-]*$/ && a[2]=="third_party" && a[3]~/^[a-f0-9]{64}$/)thirdparty_origin[a[1]]=a[3]
+ }
+ close(fn)
 }
 function emit_package(  name,origin,reason,confidence,dep,raw,j,installed,relation,parsed,op,dver,rest) {
  if(pkg=="") return
@@ -133,6 +147,7 @@ function emit_package(  name,origin,reason,confidence,dep,raw,j,installed,relati
  if(count>=4096){package_truncated=1;pkg=ver=auto=deps=status=provides="";return}
  name=pkg; names[count+1]=name; origin="unknown";reason="unknown";confidence="low"
  if(rom[name]) {origin="official";reason="system_default";confidence="high";proof="firmware-rom-baseline"}
+ else if(thirdparty_origin[name]!="") {origin="third_party";confidence="high";proof="rom-package-origin-manifest:sha256:" thirdparty_origin[name]}
  else if(manager=="opkg" && auto ~ /^(yes|true|1)$/) {reason="dependency";confidence="high";proof="opkg-auto-installed:true"}
  else if(manager=="opkg" && auto ~ /^(no|false|0)$/) {reason="manual";confidence="medium";proof="opkg-auto-installed:false";top[++top_count]=name}
  else if(manager=="apk" && world[name]) {proof="apk-world-candidate";confidence="low";intent[++intent_count]=name}

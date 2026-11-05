@@ -4,7 +4,7 @@ The three Draft 2020-12 schemas are sidecar contracts. They do not replace the h
 
 ## Identity and digest
 
-`system-snapshot-v1` uses `snapshot_id = urn:sha256:<digest>`. `evidence-sha256-v1` means: hash each present, allow-listed evidence file with SHA-256 in the documented order, concatenate the lowercase hex digests separated by newlines, then hash that byte stream with SHA-256. Paths, missing files, secrets and report presentation are not part of the digest. This is an evidence-set identity, not RFC 8785 canonical JSON.
+`system-snapshot-v1` uses `snapshot_id = urn:sha256:<digest>`. `evidence-sha256-v1` means: for each allow-listed evidence slot in the documented order, emit `logical_name:<lowercase sha256>` or `logical_name:missing`, separated by LF, then SHA-256 that byte stream. Host paths, secrets and report presentation are not part of the digest. This is an evidence-set identity, not RFC 8785 canonical JSON.
 
 Migration plans carry both `source_snapshot_id` and `source_snapshot_digest`. Build results carry both `source_plan_id` and `source_plan_digest`, plus the GitHub repository, exact 40-character Commit SHA, workflow run ID and run attempt. Consumers must reject a digest or ID mismatch instead of silently rebasing a plan.
 

@@ -274,3 +274,19 @@ def test_realistic_opkg_status_excludes_removed_and_preserves_auto_reason(tmp_pa
     assert set(packages) == {"busybox", "libubox20240329"}
     assert packages["busybox"]["install_reason"] == "manual"
     assert packages["libubox20240329"]["install_reason"] == "dependency"
+
+
+def test_third_party_origin_requires_read_only_rom_manifest_evidence(tmp_path):
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc/openwrt_release").write_text("DISTRIB_ID='OpenWrt'\n")
+    installed = tmp_path / "lib/apk/db/installed"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("P:vendor-addon\nV:1.0\n\nP:unproven-addon\nV:1.0\n\n")
+    origins = tmp_path / "rom/usr/share/smart-upgrade/package-origins.tsv"
+    origins.parent.mkdir(parents=True)
+    origins.write_text(f"vendor-addon\tthird_party\t{'a' * 64}\n")
+    report = scan(tmp_path, "local")
+    packages = {item["name"]: item for item in report["packages"]["installed"]}
+    assert packages["vendor-addon"]["origin"] == "third_party"
+    assert packages["vendor-addon"]["confidence"] == "high"
+    assert packages["unproven-addon"]["origin"] == "unknown"
