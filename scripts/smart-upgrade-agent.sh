@@ -40,7 +40,7 @@ function get_release(  line,a,k,v,fn) {
 function emit_package(  name,src,dep) {
  if(pkg=="") return
  if(pkg !~ /^[A-Za-z0-9][A-Za-z0-9+_.@-]*$/) {pkg="";return}
- name=pkg; src="unknown"
+ name=pkg; names[count+1]=name; src="unknown"
  if(auto ~ /^(yes|true|1)$/) src="dependency"
  else if(auto ~ /^(no|false|0)$/) src="manual"
  if(first==0) printf ","
