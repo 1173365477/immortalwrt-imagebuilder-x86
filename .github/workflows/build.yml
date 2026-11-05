@@ -76,7 +76,7 @@ jobs:
       - name: Resolve stable target version
         id: release
         env:
-          REQUESTED_VERSION: ${{ steps.release.outputs.version }}
+          REQUESTED_VERSION: ${{ inputs.immortalwrt_version }}
         run: |
           set -euo pipefail
           python scripts/resolve_version.py --version "$REQUESTED_VERSION"
