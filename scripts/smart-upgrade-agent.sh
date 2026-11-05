@@ -37,12 +37,28 @@ function get_release(  line,a,k,v,fn) {
  # Board.json may contain sensitive device details; do not read the file.
  if (distro=="") distro="unknown"
 }
+function read_provenance(  fn,line,p) {
+ fn=root "/etc/apk/world"
+ while ((getline line < fn)>0) {
+   sub(/[[:space:]<>=~].*$/, "", line)
+   if (line ~ /^[A-Za-z0-9][A-Za-z0-9+_.@-]*$/) world[line]=1
+ }
+ close(fn)
+ fn=root "/rom/usr/lib/opkg/status"
+ while ((getline line < fn)>0) if(line~/^Package: /)rom[substr(line,10)]=1
+ close(fn)
+ fn=root "/rom/lib/apk/db/installed"
+ while ((getline line < fn)>0) if(line~/^P:/)rom[substr(line,3)]=1
+ close(fn)
+}
 function emit_package(  name,src,dep) {
  if(pkg=="") return
  if(pkg !~ /^[A-Za-z0-9][A-Za-z0-9+_.@-]*$/) {pkg="";return}
  name=pkg; names[count+1]=name; src="unknown"
- if(auto ~ /^(yes|true|1)$/) src="dependency"
+ if(rom[name]) src="default"
+ else if(auto ~ /^(yes|true|1)$/) src="dependency"
  else if(auto ~ /^(no|false|0)$/) src="manual"
+ if(world[name] || (manager=="opkg" && auto ~ /^(no|false|0)$/)) top[++top_count]=name
  if(count>0) printf ","
  printf "{\"name\":%s,\"version\":%s,\"source\":%s,\"depends\":[",q(name),ver==""?"null":q(ver),q(src)
  n=split(deps,ds,",")
@@ -79,6 +95,7 @@ function service(name,pattern,   result) {
 }
 BEGIN {
  get_release()
+ read_provenance()
  manager="unknown"
  if(exists(root "/usr/lib/opkg/status"))manager="opkg"
  else if(exists(root "/lib/apk/db/installed"))manager="apk"
@@ -89,7 +106,9 @@ BEGIN {
  printf "\"packages\":{\"installed\":["
  if(manager=="opkg")opkg()
  else if(manager=="apk")apk()
- printf "],\"top_level\":[],\"classification_status\":\"unknown\"},"
+ printf "],\"top_level\":["
+ for(i=1;i<=top_count;i++){if(i>1)printf ",";printf "%s",q(top[i])}
+ printf "],\"classification_status\":%s},",q(top_count>0?"partial":"unknown")
  # No service commands, no Docker socket and no config/environment secrets.
  printf "\"services\":{"
  printf "\"openclash\":%s,",service("openclash","^luci-app-openclash$")
