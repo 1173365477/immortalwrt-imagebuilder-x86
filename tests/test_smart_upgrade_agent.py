@@ -139,8 +139,46 @@ def _storage_fixture(tmp_path, docker_root="/var/lib/docker", config_root=None, 
     return fixture
 
 
+def _sysfs_block(root, major_minor, name, *, disk=None, partition=None, virtual=False):
+    if virtual:
+        node = root / "sys/devices/virtual/block" / name
+    else:
+        disk = disk or name
+        node = root / "sys/devices/pci0000:00/block" / disk
+        if name != disk:
+            node = node / name
+    node.mkdir(parents=True, exist_ok=True)
+    (node / "dev").write_text(major_minor + "\n")
+    (node / "size").write_text("2048\n")
+    if partition is not None:
+        (node / "partition").write_text(str(partition) + "\n")
+    dev_link = root / "sys/dev/block" / major_minor
+    dev_link.parent.mkdir(parents=True, exist_ok=True)
+    dev_link.symlink_to(node)
+    return node
+
+
+def _sysfs_slave(parent, slave):
+    slaves = parent / "slaves"
+    slaves.mkdir(exist_ok=True)
+    (slaves / slave.name).symlink_to(slave)
+
+
+def _topology_fixture(tmp_path, mounts, docker_root="/data/docker", docker_mounts=""):
+    fixture = _storage_fixture(
+        tmp_path,
+        docker_root=docker_root,
+        mounts=mounts,
+        docker_mounts=docker_mounts,
+    )
+    (fixture / "docker-container-mounts.tsv").write_text(docker_mounts)
+    (fixture / "docker-volumes.tsv").write_text("")
+    return fixture
+
+
 def test_runtime_docker_root_wins_and_records_config_mismatch(tmp_path):
     fixture = _storage_fixture(tmp_path, "/data/docker", "/var/lib/docker", "25 1 0:1 / / rw - overlay overlay rw\n26 1 8:2 / /data rw - ext4 /dev/sdb2 rw\n")
+    (fixture / "block-topology.tsv").write_text("8:2\tsdb\t2\tcomplete\n")
     sys_size = tmp_path / "sys/dev/block/8:2/size"
     sys_size.parent.mkdir(parents=True)
     sys_size.write_text("2097152\n")
@@ -319,6 +357,164 @@ def test_separate_partition_does_not_imply_firmware_overwrite_safety(
     assert docker_root["persistence"] == "separate_mount"
     assert docker_root["firmware_overwrite_risk"] == expected_risk
     assert "safe" not in json.dumps(docker_root).lower()
+
+
+@pytest.mark.parametrize(
+    ("root_disk", "data_disk", "expected"),
+    [
+        ("nvme0n1", "nvme0n1", "same_physical_disk"),
+        ("nvme0n1", "nvme1n1", "different_physical_disk"),
+    ],
+)
+def test_dm_devices_compare_recursive_physical_disk_sets(tmp_path, root_disk, data_disk, expected):
+    fixture = _topology_fixture(
+        tmp_path,
+        "25 1 253:0 / / rw - ext4 /dev/dm-0 rw\n"
+        "26 1 253:1 / /data rw - ext4 /dev/dm-1 rw\n",
+    )
+    root_leaf = _sysfs_block(tmp_path, "259:2", f"{root_disk}p2", disk=root_disk, partition=2)
+    data_leaf = _sysfs_block(tmp_path, "259:3", f"{data_disk}p3", disk=data_disk, partition=3)
+    dm0 = _sysfs_block(tmp_path, "253:0", "dm-0", virtual=True)
+    dm1 = _sysfs_block(tmp_path, "253:1", "dm-1", virtual=True)
+    _sysfs_slave(dm0, root_leaf)
+    _sysfs_slave(dm1, data_leaf)
+
+    report = scan(tmp_path, "local", fixture)
+    target = next(item for item in report["storage"]["targets"] if item["kind"] == "docker_root")
+    assert target["firmware_overwrite_risk"] == expected
+
+
+@pytest.mark.parametrize(
+    ("data_disk", "data_major_minor", "expected"),
+    [
+        ("nvme0n1", "259:3", "same_physical_disk"),
+        ("nvme1n1", "259:19", "different_physical_disk"),
+    ],
+)
+def test_ordinary_nvme_partitions_use_physical_parent(tmp_path, data_disk, data_major_minor, expected):
+    fixture = _topology_fixture(
+        tmp_path,
+        "25 1 259:2 / / rw - ext4 /dev/nvme0n1p2 rw\n"
+        f"26 1 {data_major_minor} / /data rw - ext4 /dev/{data_disk}p3 rw\n",
+    )
+    _sysfs_block(tmp_path, "259:2", "nvme0n1p2", disk="nvme0n1", partition=2)
+    _sysfs_block(tmp_path, data_major_minor, f"{data_disk}p3", disk=data_disk, partition=3)
+    report = scan(tmp_path, "local", fixture)
+    assert report["storage"]["targets"][0]["firmware_overwrite_risk"] == expected
+
+
+@pytest.mark.parametrize(("virtual_name", "virtual_major_minor"), [("dm-1", "253:1"), ("md0", "9:0")])
+def test_multi_slave_virtual_device_retains_all_physical_parents(tmp_path, virtual_name, virtual_major_minor):
+    fixture = _topology_fixture(
+        tmp_path,
+        "25 1 8:2 / / rw - ext4 /dev/sda2 rw\n"
+        f"26 1 {virtual_major_minor} / /data rw - ext4 /dev/mapper/data rw\n",
+    )
+    _sysfs_block(tmp_path, "8:2", "sda2", disk="sda", partition=2)
+    left = _sysfs_block(tmp_path, "8:17", "sdb1", disk="sdb", partition=1)
+    right = _sysfs_block(tmp_path, "8:33", "sdc1", disk="sdc", partition=1)
+    virtual = _sysfs_block(tmp_path, virtual_major_minor, virtual_name, virtual=True)
+    _sysfs_slave(virtual, left)
+    _sysfs_slave(virtual, right)
+
+    local = scan(tmp_path, "local", fixture)
+    data_mount = local["storage"]["mount_inventory"]["entries"][1]
+    target = local["storage"]["targets"][0]
+    assert data_mount["block_resolution"] == "resolved"
+    assert set(data_mount["physical_disks"]) == {"sdb", "sdc"}
+    assert len(data_mount["physical_disk_ids"]) == 2
+    assert data_mount["physical_disk_id"] is None
+    assert target["firmware_overwrite_risk"] == "different_physical_disk"
+
+    redacted = scan(tmp_path, "redacted", fixture)
+    redacted_mount = redacted["storage"]["mount_inventory"]["entries"][1]
+    assert redacted_mount["physical_disks"] is None
+    assert redacted_mount["physical_disk_ids"] == data_mount["physical_disk_ids"]
+    assert "sdb" not in json.dumps(redacted)
+
+
+def test_nested_dm_md_chain_resolves_recursively(tmp_path):
+    fixture = _topology_fixture(
+        tmp_path,
+        "25 1 8:2 / / rw - ext4 /dev/sda2 rw\n"
+        "26 1 253:1 / /data rw - ext4 /dev/dm-1 rw\n",
+    )
+    _sysfs_block(tmp_path, "8:2", "sda2", disk="sda", partition=2)
+    leaf = _sysfs_block(tmp_path, "8:17", "sdb1", disk="sdb", partition=1)
+    md = _sysfs_block(tmp_path, "9:0", "md0", virtual=True)
+    dm = _sysfs_block(tmp_path, "253:1", "dm-1", virtual=True)
+    _sysfs_slave(md, leaf)
+    _sysfs_slave(dm, md)
+    report = scan(tmp_path, "local", fixture)
+    assert report["storage"]["targets"][0]["firmware_overwrite_risk"] == "different_physical_disk"
+
+
+@pytest.mark.parametrize("failure", ["missing_slave", "missing_sysfs", "cycle", "depth_limit"])
+def test_incomplete_or_invalid_virtual_topology_is_unknown(tmp_path, failure):
+    fixture = _topology_fixture(
+        tmp_path,
+        "25 1 253:0 / / rw - ext4 /dev/dm-0 rw\n"
+        "26 1 253:1 / /data rw - ext4 /dev/dm-1 rw\n",
+    )
+    leaf = _sysfs_block(tmp_path, "8:2", "sda2", disk="sda", partition=2)
+    dm0 = _sysfs_block(tmp_path, "253:0", "dm-0", virtual=True)
+    _sysfs_slave(dm0, leaf)
+    if failure == "missing_sysfs":
+        pass
+    else:
+        dm1 = _sysfs_block(tmp_path, "253:1", "dm-1", virtual=True)
+        if failure == "missing_slave":
+            broken = tmp_path / "sys/devices/virtual/block/missing-slave"
+            broken.mkdir(parents=True)
+            _sysfs_slave(dm1, broken)
+        elif failure == "cycle":
+            _sysfs_slave(dm1, dm0)
+            _sysfs_slave(dm0, dm1)
+        else:
+            parent = dm1
+            for index in range(2, 12):
+                child = _sysfs_block(tmp_path, f"253:{index}", f"dm-{index}", virtual=True)
+                _sysfs_slave(parent, child)
+                parent = child
+            _sysfs_slave(parent, leaf)
+
+    report = scan(tmp_path, "local", fixture)
+    target = report["storage"]["targets"][0]
+    assert target["firmware_overwrite_risk"] == "unknown"
+    assert report["storage"]["status"] == "partial"
+    assert "block_topology_unknown" in report["storage"]["errors"]
+
+
+def test_logical_names_in_injected_topology_are_not_physical_evidence(tmp_path):
+    fixture = _topology_fixture(
+        tmp_path,
+        "25 1 253:0 / / rw - ext4 /dev/dm-0 rw\n"
+        "26 1 253:1 / /data rw - ext4 /dev/dm-1 rw\n",
+    )
+    (fixture / "block-topology.tsv").write_text(
+        "253:0\tdm-0\t-\tcomplete\n253:1\tdm-1\t-\tcomplete\n"
+    )
+    report = scan(tmp_path, "local", fixture)
+    assert report["storage"]["targets"][0]["firmware_overwrite_risk"] == "unknown"
+
+
+def test_dm_root_and_all_docker_targets_use_the_same_topology_result(tmp_path):
+    fixture = _topology_fixture(
+        tmp_path,
+        "25 1 253:0 / / rw - ext4 /dev/dm-0 rw\n"
+        "26 1 8:3 / /data rw - ext4 /dev/sda3 rw\n",
+        docker_mounts=(
+            "bind\t/data/bind\t/bind\t\n"
+            "volume\t/data/volume\t/volume\tvolume-a\n"
+        ),
+    )
+    root_leaf = _sysfs_block(tmp_path, "8:2", "sda2", disk="sda", partition=2)
+    _sysfs_block(tmp_path, "8:3", "sda3", disk="sda", partition=3)
+    dm0 = _sysfs_block(tmp_path, "253:0", "dm-0", virtual=True)
+    _sysfs_slave(dm0, root_leaf)
+    report = scan(tmp_path, "local", fixture)
+    assert {item["kind"] for item in report["storage"]["targets"]} == {"docker_root", "bind", "volume"}
+    assert {item["firmware_overwrite_risk"] for item in report["storage"]["targets"]} == {"same_physical_disk"}
 
 
 def test_all_container_states_and_unused_volumes_are_in_scan_scope(tmp_path):
