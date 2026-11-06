@@ -146,15 +146,20 @@ def _thirdparty_compatibility(
     if not isinstance(apk_checks, list) or not apk_checks:
         return False, "APK validation evidence is missing"
     target_arch = capabilities.get("arch")
+    verified_packages: set[str] = set()
+    verified_dependencies: set[str] = set()
     for check in apk_checks:
         relative = PurePosixPath(str(check.get("file") or ""))
         if (
             not isinstance(check, dict)
             or not str(check.get("file") or "").endswith(".apk")
             or check.get("magic_verified") is not True
-            or check.get("metadata_status") not in {"verified", "unavailable"}
+            or check.get("metadata_status") != "verified"
             or not SHA256_RE.fullmatch(str(check.get("sha256") or ""))
-            or check.get("architecture") not in {"all", "noarch", "unknown", target_arch}
+            or check.get("architecture") not in {"all", "noarch", target_arch}
+            or check.get("package") not in provider_rule.get("packages", [])
+            or not check.get("version")
+            or not isinstance(check.get("dependencies"), list)
             or relative.is_absolute()
             or len(relative.parts) != 2
             or relative.parts[0] != provider
@@ -163,6 +168,18 @@ def _thirdparty_compatibility(
             return False, "APK hash, format, or architecture evidence is invalid"
         if thirdparty_files.get(check["file"]) != check["sha256"]:
             return False, "bundled APK is missing or does not match compatibility evidence"
+        verified_packages.add(check["package"])
+        for dependency in check["dependencies"]:
+            if not isinstance(dependency, str) or not re.fullmatch(r"[A-Za-z0-9_.+:-]+(?:[<>=~]+[^\s]+)?", dependency):
+                return False, "APK dependency metadata cannot be resolved safely"
+            verified_dependencies.add(re.split(r"[<>=~]", dependency, maxsplit=1)[0])
+    if verified_packages != set(provider_rule.get("packages", [])):
+        return False, "verified APK package identities do not cover the provider rule"
+    unresolved_apk_dependencies = sorted(
+        verified_dependencies - set(official_index) - set(provider_rule.get("packages", []))
+    )
+    if unresolved_apk_dependencies:
+        return False, "APK dependencies are absent from the target index: " + ", ".join(unresolved_apk_dependencies)
     if not status.get("upstream_release"):
         return False, "upstream release identity is missing"
     return True, "verified provider, release, asset, APK, architecture and dependency evidence matched"

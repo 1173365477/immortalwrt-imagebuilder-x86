@@ -11,7 +11,10 @@ OpenClash is selected by an exact user-pinned tag and exact APK asset. Nikki's
 release archive must encode both target series and architecture. Lucky's
 release notes must name the target series and every APK must encode x86_64.
 All three require GitHub's asset SHA-256 digest, APK v3 magic, and—when the
-local tool supports it—package metadata architecture validation. Official
+local APK metadata tool can fully parse it—package name, architecture, version
+and dependency validation. If that tool is absent, fails, or returns incomplete
+metadata, compatibility is unresolved rather than inferred from magic and
+SHA-256. Official
 dependencies are checked against the frozen release index. A same-name OPKG
 and APK is never compatibility evidence by itself.
 
@@ -27,6 +30,15 @@ APK files actually present in `files/root/thirdparty`. A bare or stale
 copied from another target, or a status without the matching bundled APK fails
 closed. The evidence digest supplies integrity; the upstream revalidation
 supplies source authenticity.
+
+Consumer revalidation never re-resolves a provider configured as `latest`.
+It re-fetches the status's frozen tag and requires the same release ID, then
+re-applies the current versioned provider rule to that frozen release. Exact-tag
+providers must still match the configured version; latest-tag providers must
+still satisfy target-series declarations, architecture/filename patterns and
+the complete required asset set. Every re-downloaded APK is parsed again, and
+its package name, architecture, version and dependencies must match both the
+provider rule and the recorded evidence.
 
 Unknown providers, missing assets, wrong architecture/package manager,
 untrusted URLs, absent digests, missing official dependencies, ambiguous

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 
@@ -11,6 +12,12 @@ from migration_plan import canonical_digest, generate_plan, write_legacy_outputs
 
 ROOT = Path(__file__).resolve().parents[1]
 HEX = "a" * 64
+FETCH_SPEC = importlib.util.spec_from_file_location(
+    "fetch_thirdparty_for_plan_tests", ROOT / "scripts/fetch-thirdparty.py"
+)
+assert FETCH_SPEC and FETCH_SPEC.loader
+FETCH = importlib.util.module_from_spec(FETCH_SPEC)
+FETCH_SPEC.loader.exec_module(FETCH)
 
 
 def snapshot():
@@ -69,7 +76,8 @@ def trusted_status(capabilities, index, package="luci-app-openclash"):
         "apk_checks": [{
             "file": "openclash/luci-app-openclash-0.48.002.apk", "sha256": HEX,
             "magic_verified": True, "metadata_status": "verified",
-            "architecture": "noarch",
+            "architecture": "noarch", "package": package,
+            "version": "0.48.002", "dependencies": [],
         }],
         "official_dependencies": {
             "required": ["ca-bundle"], "missing": [],
@@ -198,6 +206,51 @@ def test_forged_compatible_status_cannot_bypass_gate():
     assert next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")["decision"] == "block"
 
 
+def test_unavailable_apk_metadata_cannot_be_final_compatibility_evidence():
+    data = snapshot()
+    data["packages"]["installed"][-1].update(name="luci-app-openclash", origin="third_party")
+    data["packages"]["top_level"] = ["luci-app-openclash"]
+    index = official_index()
+    capabilities = target(index)
+    statuses = trusted_status(capabilities, index)
+    status = statuses["openclash"]
+    status["apk_checks"][0]["metadata_status"] = "unavailable"
+    status["apk_checks"][0]["architecture"] = "unknown"
+    status["evidence_digest"] = canonical_digest({
+        key: value for key, value in status.items() if key != "evidence_digest"
+    })
+    plan = generate_plan(
+        data, capabilities, index, rules(), statuses,
+        thirdparty_files={"openclash/luci-app-openclash-0.48.002.apk": HEX},
+        trusted_thirdparty_evidence={status["evidence_digest"]},
+    )
+    row = next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")
+    assert row["decision"] == "block"
+    assert plan["build_allowed"] is False
+
+
+def test_verified_apk_metadata_with_unresolved_dependency_blocks_build():
+    data = snapshot()
+    data["packages"]["installed"][-1].update(name="luci-app-openclash", origin="third_party")
+    data["packages"]["top_level"] = ["luci-app-openclash"]
+    index = official_index()
+    capabilities = target(index)
+    statuses = trusted_status(capabilities, index)
+    status = statuses["openclash"]
+    status["apk_checks"][0]["dependencies"] = ["missing-runtime>=1"]
+    status["evidence_digest"] = canonical_digest({
+        key: value for key, value in status.items() if key != "evidence_digest"
+    })
+    plan = generate_plan(
+        data, capabilities, index, rules(), statuses,
+        thirdparty_files={"openclash/luci-app-openclash-0.48.002.apk": HEX},
+        trusted_thirdparty_evidence={status["evidence_digest"]},
+    )
+    row = next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")
+    assert row["decision"] == "block"
+    assert "target index" in row["reason"]
+
+
 def test_self_consistent_status_and_local_apk_without_trusted_provenance_cannot_bypass_gate():
     data = snapshot()
     data["packages"]["installed"][-1].update(name="luci-app-openclash", origin="third_party")
@@ -211,6 +264,65 @@ def test_self_consistent_status_and_local_apk_without_trusted_provenance_cannot_
     row = next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")
     assert row["decision"] == "block"
     assert "trusted upstream" in row["reason"]
+
+
+def test_revalidated_real_format_status_allows_traceable_migration_plan(monkeypatch, tmp_path):
+    payload = b"ADB0real-format-fixture"
+    digest = hashlib.sha256(payload).hexdigest()
+    asset_name = "luci-app-openclash-0.48.002.apk"
+    url = f"https://github.com/vernesong/OpenClash/releases/download/v0.48.002/{asset_name}"
+    release = {"id": 101, "tag_name": "v0.48.002", "assets": [{
+        "id": 202, "name": asset_name, "digest": f"sha256:{digest}",
+        "browser_download_url": url,
+    }]}
+    monkeypatch.setattr(FETCH, "release_metadata", lambda *args, **kwargs: release)
+    monkeypatch.setattr(
+        FETCH, "download",
+        lambda _url, destination: (destination.write_bytes(payload), digest)[1],
+    )
+    monkeypatch.setattr(FETCH, "inspect_apk_metadata", lambda _path: ({
+        "name": "luci-app-openclash", "arch": "noarch",
+        "version": "0.48.002", "dependencies": [],
+    }, None))
+
+    data = snapshot()
+    data["packages"]["installed"][-1].update(name="luci-app-openclash", origin="third_party")
+    data["packages"]["top_level"] = ["luci-app-openclash"]
+    index = official_index()
+    capabilities = target(index)
+    provider_rule = {
+        **rules()["providers"]["openclash"],
+        "release": "tag", "tag_template": "v{openclash_version}",
+        "asset_patterns": [r"^luci-app-openclash-{openclash_version}\.apk$"],
+        "archive_member_patterns": [], "supported_package_managers": ["apk"],
+        "supported_distributions": ["immortalwrt"], "supported_architectures": ["all"],
+    }
+    provider_rules = {"providers": {"openclash": provider_rule}}
+    status = trusted_status(capabilities, index)["openclash"]
+    status["assets"][0]["sha256"] = digest
+    status["apk_checks"][0]["sha256"] = digest
+    status["evidence_digest"] = canonical_digest({
+        key: value for key, value in status.items() if key != "evidence_digest"
+    })
+    bundled = tmp_path / "thirdparty"
+    (bundled / "openclash").mkdir(parents=True)
+    (bundled / f"openclash/{asset_name}").write_bytes(payload)
+    trusted_digest = FETCH.revalidate_status_provenance(
+        "openclash", provider_rule, status, capabilities, bundled,
+        FETCH.template_values("25.12.2", capabilities, "0.48.002"),
+    )
+    plan = generate_plan(
+        data, capabilities, index, provider_rules, {"openclash": status},
+        thirdparty_files={f"openclash/{asset_name}": digest},
+        trusted_thirdparty_evidence={trusted_digest},
+    )
+    Draft202012Validator(
+        json.loads((ROOT / "schemas/migration-plan-v1.json").read_text())
+    ).validate(plan)
+    assert plan["build_allowed"] is True
+    assert next(
+        row for row in plan["decisions"] if row["package"] == "luci-app-openclash"
+    )["decision"] == "keep"
 
 
 def test_compatible_status_cannot_be_reused_for_other_release():

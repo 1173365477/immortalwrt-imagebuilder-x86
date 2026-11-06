@@ -116,6 +116,7 @@ def test_failed_multi_apk_provider_publishes_nothing(strict, tmp_path):
     with pytest.raises(MODULE.ProviderError, match="metadata could not be verified"):
         MODULE.validate_and_publish_apks(
             "synthetic", [first, second], {"arch": "x86_64"}, destination,
+            {"first", "second"},
             inspector=inspector,
         )
     statuses = {"synthetic": {"status": "unresolved"}}
@@ -143,6 +144,7 @@ def test_unknown_or_incomplete_apk_metadata_is_unresolved(metadata, tmp_path):
     with pytest.raises(MODULE.ProviderError, match="metadata") as exc:
         MODULE.validate_and_publish_apks(
             "synthetic", [package], {"arch": "x86_64"}, destination,
+            {"pkg"},
             inspector=inspector,
         )
     assert exc.value.status == "unresolved"
@@ -158,6 +160,7 @@ def test_complete_apk_metadata_publishes_provider_atomically(tmp_path):
     package.write_bytes(b"ADB0payload")
     checks = MODULE.validate_and_publish_apks(
         "synthetic", [package], {"arch": "x86_64"}, destination,
+        {"pkg"},
         inspector=lambda _: ({"name": "pkg", "arch": "x86_64", "version": "1", "dependencies": []}, None),
     )
     assert (destination / "synthetic/package.apk").read_bytes() == b"ADB0payload"
@@ -180,18 +183,35 @@ def test_provenance_revalidation_rejects_forged_local_apk(monkeypatch, tmp_path)
         return digest
 
     monkeypatch.setattr(MODULE, "download", downloader)
+    monkeypatch.setattr(MODULE, "inspect_apk_metadata", lambda _path: (
+        {"name": "pkg", "arch": "x86_64", "version": "1", "dependencies": []}, None
+    ))
     bundled = tmp_path / "thirdparty"
     (bundled / "openclash").mkdir(parents=True)
     (bundled / "openclash/package.apk").write_bytes(b"ADB0forged")
     status = {
         "release_id": 101, "upstream_release": "v1", "evidence_digest": "e" * 64,
         "assets": [{"asset_id": 202, "asset": "package.apk", "sha256": digest, "url": url}],
-        "apk_checks": [{"file": "openclash/package.apk", "sha256": digest}],
+        "apk_checks": [{
+            "file": "openclash/package.apk", "sha256": digest,
+            "metadata_status": "verified", "package": "pkg", "architecture": "x86_64",
+            "version": "1", "dependencies": [],
+        }],
     }
-    cfg = {"repository": "vernesong/OpenClash", "archive_member_patterns": []}
+    cfg = {
+        "repository": "vernesong/OpenClash", "release": "tag", "tag_template": "{openclash_version}",
+        "asset_patterns": [r"^package\.apk$"], "archive_member_patterns": [], "packages": ["pkg"],
+        "supported_package_managers": ["apk"], "supported_distributions": ["immortalwrt"],
+        "supported_architectures": ["x86_64"],
+    }
+    capabilities = {
+        "distribution": "immortalwrt", "target_version": "25.12.2",
+        "arch": "x86_64", "package_manager": "apk",
+    }
+    values = MODULE.template_values("25.12.2", capabilities, "v1")
     with pytest.raises(MODULE.ProviderError, match="bundled APK bytes"):
         MODULE.revalidate_status_provenance(
-            "openclash", cfg, status, {}, bundled, {}
+            "openclash", cfg, status, capabilities, bundled, values
         )
 
 
@@ -205,15 +225,161 @@ def test_provenance_revalidation_accepts_upstream_identical_bundle(monkeypatch, 
     }]}
     monkeypatch.setattr(MODULE, "release_metadata", lambda *args, **kwargs: release)
     monkeypatch.setattr(MODULE, "download", lambda _url, destination: (destination.write_bytes(payload), digest)[1])
+    monkeypatch.setattr(MODULE, "inspect_apk_metadata", lambda _path: (
+        {"name": "pkg", "arch": "x86_64", "version": "1", "dependencies": []}, None
+    ))
     bundled = tmp_path / "thirdparty"
     (bundled / "openclash").mkdir(parents=True)
     (bundled / "openclash/package.apk").write_bytes(payload)
     status = {
         "release_id": 101, "upstream_release": "v1", "evidence_digest": "e" * 64,
         "assets": [{"asset_id": 202, "asset": "package.apk", "sha256": digest, "url": url}],
-        "apk_checks": [{"file": "openclash/package.apk", "sha256": digest}],
+        "apk_checks": [{
+            "file": "openclash/package.apk", "sha256": digest,
+            "metadata_status": "verified", "package": "pkg", "architecture": "x86_64",
+            "version": "1", "dependencies": [],
+        }],
     }
-    cfg = {"repository": "vernesong/OpenClash", "archive_member_patterns": []}
+    cfg = {
+        "repository": "vernesong/OpenClash", "release": "tag", "tag_template": "{openclash_version}",
+        "asset_patterns": [r"^package\.apk$"], "archive_member_patterns": [], "packages": ["pkg"],
+        "supported_package_managers": ["apk"], "supported_distributions": ["immortalwrt"],
+        "supported_architectures": ["x86_64"],
+    }
+    capabilities = {
+        "distribution": "immortalwrt", "target_version": "25.12.2",
+        "arch": "x86_64", "package_manager": "apk",
+    }
+    values = MODULE.template_values("25.12.2", capabilities, "v1")
     assert MODULE.revalidate_status_provenance(
-        "openclash", cfg, status, {}, bundled, {}
+        "openclash", cfg, status, capabilities, bundled, values
     ) == "e" * 64
+
+
+def test_frozen_openclash_release_must_still_match_configured_version():
+    cfg = rules()["providers"]["openclash"]
+    capabilities = {
+        "distribution": "immortalwrt", "target_version": "25.12.2",
+        "arch": "x86_64", "package_manager": "apk",
+    }
+    values = MODULE.template_values("25.12.2", capabilities, "0.48.002")
+    asset = {"id": 202, "name": "luci-app-openclash-0.48.999.apk"}
+    release = {"id": 101, "tag_name": "v0.48.999", "assets": [asset]}
+    status = {
+        "upstream_release": "v0.48.999",
+        "assets": [{"asset_id": 202, "asset": asset["name"]}],
+    }
+    with pytest.raises(MODULE.ProviderError, match="violates required tag"):
+        MODULE.validate_frozen_release("openclash", cfg, release, status, capabilities, values)
+
+
+@pytest.mark.parametrize(("provider", "release", "match"), [
+    (
+        "nikki",
+        {"id": 301, "tag_name": "v1.0.0", "assets": [
+            {"id": 302, "name": "nikki_aarch64-openwrt-25.12.tar.gz"},
+        ]},
+        "no release asset matching",
+    ),
+    (
+        "nikki",
+        {"id": 311, "tag_name": "v1.0.0", "assets": [
+            {"id": 312, "name": "nikki_x86_64-openwrt-24.10.tar.gz"},
+        ]},
+        "no release asset matching",
+    ),
+    (
+        "lucky",
+        {"id": 401, "tag_name": "v2.0.0", "body": "OpenWrt 24.10", "assets": [
+            {"id": 402, "name": "lucky-2.0.0_x86_64.apk"},
+            {"id": 403, "name": "luci-app-lucky-2.0.0_x86_64.apk"},
+            {"id": 404, "name": "luci-i18n-lucky-zh-cn-2.0.0_x86_64.apk"},
+        ]},
+        "does not declare compatibility",
+    ),
+    (
+        "lucky",
+        {"id": 411, "tag_name": "v2.0.0", "body": "ImmortalWrt 25.12", "assets": [
+            {"id": 412, "name": "lucky-2.0.0_aarch64.apk"},
+            {"id": 413, "name": "luci-app-lucky-2.0.0_x86_64.apk"},
+            {"id": 414, "name": "luci-i18n-lucky-zh-cn-2.0.0_x86_64.apk"},
+        ]},
+        "no release asset matching",
+    ),
+])
+def test_latest_provider_frozen_release_rechecks_series_arch_and_assets(provider, release, match):
+    cfg = rules()["providers"][provider]
+    capabilities = {
+        "distribution": "immortalwrt", "target_version": "25.12.2",
+        "arch": "x86_64", "package_manager": "apk",
+    }
+    values = MODULE.template_values("25.12.2", capabilities, "0.48.002")
+    status = {
+        "upstream_release": release["tag_name"],
+        "assets": [{"asset_id": asset["id"], "asset": asset["name"]} for asset in release["assets"]],
+    }
+    with pytest.raises(MODULE.ProviderError, match=match):
+        MODULE.validate_frozen_release(provider, cfg, release, status, capabilities, values)
+
+
+def test_frozen_openclash_release_with_complete_rule_evidence_is_accepted():
+    cfg = rules()["providers"]["openclash"]
+    capabilities = {
+        "distribution": "immortalwrt", "target_version": "25.12.2",
+        "arch": "x86_64", "package_manager": "apk",
+    }
+    values = MODULE.template_values("25.12.2", capabilities, "0.48.002")
+    asset = {"id": 202, "name": "luci-app-openclash-0.48.002.apk"}
+    release = {"id": 101, "tag_name": "v0.48.002", "assets": [asset]}
+    status = {
+        "upstream_release": "v0.48.002",
+        "assets": [{"asset_id": 202, "asset": asset["name"]}],
+    }
+    assert MODULE.validate_frozen_release(
+        "openclash", cfg, release, status, capabilities, values
+    ) == [asset]
+
+
+@pytest.mark.parametrize(("metadata", "match"), [
+    ({"name": "other-package", "arch": "x86_64", "version": "1", "dependencies": []}, "package name"),
+    ({"name": "pkg", "arch": "aarch64", "version": "1", "dependencies": []}, "architecture"),
+    ({"name": "pkg", "arch": "x86_64", "version": "1"}, "metadata is incomplete"),
+])
+def test_consumer_rejects_apk_internal_identity_arch_or_dependencies(monkeypatch, tmp_path, metadata, match):
+    payload = b"ADB0trusted"
+    digest = hashlib.sha256(payload).hexdigest()
+    url = "https://github.com/vernesong/OpenClash/releases/download/v1/package.apk"
+    release = {"id": 101, "tag_name": "v1", "assets": [{
+        "id": 202, "name": "package.apk", "digest": f"sha256:{digest}",
+        "browser_download_url": url,
+    }]}
+    monkeypatch.setattr(MODULE, "release_metadata", lambda *args, **kwargs: release)
+    monkeypatch.setattr(MODULE, "download", lambda _url, destination: (destination.write_bytes(payload), digest)[1])
+    monkeypatch.setattr(MODULE, "inspect_apk_metadata", lambda _path: (metadata, None))
+    bundled = tmp_path / "thirdparty"
+    (bundled / "openclash").mkdir(parents=True)
+    (bundled / "openclash/package.apk").write_bytes(payload)
+    status = {
+        "release_id": 101, "upstream_release": "v1", "evidence_digest": "e" * 64,
+        "assets": [{"asset_id": 202, "asset": "package.apk", "sha256": digest, "url": url}],
+        "apk_checks": [{
+            "file": "openclash/package.apk", "sha256": digest,
+            "metadata_status": "verified", "package": "pkg", "architecture": "x86_64",
+            "version": "1", "dependencies": [],
+        }],
+    }
+    cfg = {
+        "repository": "vernesong/OpenClash", "release": "tag", "tag_template": "{openclash_version}",
+        "asset_patterns": [r"^package\.apk$"], "archive_member_patterns": [], "packages": ["pkg"],
+        "supported_package_managers": ["apk"], "supported_distributions": ["immortalwrt"],
+        "supported_architectures": ["x86_64"],
+    }
+    capabilities = {
+        "distribution": "immortalwrt", "target_version": "25.12.2",
+        "arch": "x86_64", "package_manager": "apk",
+    }
+    with pytest.raises(MODULE.ProviderError, match=match):
+        MODULE.revalidate_status_provenance(
+            "openclash", cfg, status, capabilities, bundled,
+            MODULE.template_values("25.12.2", capabilities, "v1"),
+        )

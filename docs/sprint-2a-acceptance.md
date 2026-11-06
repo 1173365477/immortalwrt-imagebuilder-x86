@@ -56,6 +56,25 @@ The final trust-boundary review also reproduced three additional weaknesses:
   the APK bytes actually bundled. Statuses not authenticated by that trusted
   path remain blocked.
 
+The final evidence-closure review at `ae2db7271daa3dc57784780c3566bc45137209c6`
+reproduced two further validation gaps and closed both in the real Migration
+Plan CLI path:
+
+- Re-fetching a frozen GitHub Release authenticated its repository, release ID,
+  asset ID and digest, but did not re-apply the versioned provider policy. The
+  consumer now validates an exact configured tag when required, or retains the
+  initially frozen `latest` identity, then rechecks the target-series
+  declaration, architecture/series asset patterns and the complete required
+  asset set. A genuine asset with the wrong provider version or pattern is
+  blocked.
+- Upstream SHA-256 authenticated bytes but did not prove the internal APK
+  identity. Both producer and consumer now require parseable APK name,
+  architecture, version and dependency metadata. The package set must exactly
+  match the provider rule, architecture must match the target or be explicit
+  `all`/`noarch`, and status metadata must equal the consumer's fresh parse.
+  `metadata_status=unavailable` and `architecture=unknown` cannot authorize a
+  build.
+
 ## Safety properties and blockers
 
 - Release and package data are read-only HTTPS metadata. A missing release,

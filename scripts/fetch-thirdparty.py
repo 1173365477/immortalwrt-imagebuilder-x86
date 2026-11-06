@@ -260,12 +260,12 @@ def match_assets(
 def inspect_apk_metadata(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     apk = shutil.which("apk")
     if not apk:
-        return None, "APK metadata inspection tool is unavailable; magic, digest, configured architecture and dependencies were checked."
+        return None, "APK metadata inspection tool is unavailable"
     process = subprocess.run(
         [apk, "adbdump", str(path)], capture_output=True, text=True, check=False, timeout=30
     )
     if process.returncode != 0:
-        return None, "APK metadata inspection was unavailable for this APK format; configured compatibility checks were used."
+        return None, "APK metadata inspection failed for this APK format"
     metadata: dict[str, Any] = {"raw_summary": process.stdout[:2000]}
     for key in ("name", "arch", "version"):
         match = re.search(rf"(?mi)^\s*{key}\s*[:=]\s*(\S+)", process.stdout)
@@ -280,6 +280,7 @@ def validate_and_publish_apks(
     output_apks: list[Path],
     capabilities: dict[str, Any],
     destination: Path,
+    expected_packages: set[str],
     *,
     inspector=inspect_apk_metadata,
 ) -> list[dict[str, Any]]:
@@ -310,6 +311,11 @@ def validate_and_publish_apks(
             raise ProviderError(
                 "incompatible", f"APK {path.name} architecture {arch} conflicts with {capabilities['arch']}"
             )
+        if metadata["name"] not in expected_packages:
+            raise ProviderError(
+                "incompatible",
+                f"APK {path.name} package {metadata['name']!r} is not declared by provider {provider}",
+            )
         checks.append({
             "file": f"{provider}/{path.name}",
             "sha256": sha256_file(path),
@@ -320,6 +326,15 @@ def validate_and_publish_apks(
             "version": metadata["version"],
             "dependencies": metadata["dependencies"],
         })
+
+    actual_packages = {check["package"] for check in checks}
+    if actual_packages != expected_packages:
+        missing = sorted(expected_packages - actual_packages)
+        unexpected = sorted(actual_packages - expected_packages)
+        raise ProviderError(
+            "unresolved",
+            f"provider APK package set mismatch; missing={missing}, unexpected={unexpected}",
+        )
 
     final_provider = destination / provider
     if final_provider.exists():
@@ -414,6 +429,51 @@ def compatible_status(
     return status
 
 
+def validate_frozen_release(
+    provider: str,
+    cfg: dict[str, Any],
+    release: dict[str, Any],
+    status: dict[str, Any],
+    capabilities: dict[str, Any],
+    values: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Re-apply the versioned provider policy to one frozen upstream release."""
+    manager = capabilities.get("package_manager")
+    if manager not in cfg.get("supported_package_managers", []):
+        raise ProviderError("incompatible", f"{provider}: target package manager is not allowed")
+    distribution = capabilities.get("distribution")
+    if distribution not in cfg.get("supported_distributions", ["immortalwrt"]):
+        raise ProviderError("incompatible", f"{provider}: target distribution is not allowed")
+    architecture = capabilities.get("arch")
+    supported_arches = cfg.get("supported_architectures", [])
+    if architecture not in supported_arches and "all" not in supported_arches:
+        raise ProviderError("incompatible", f"{provider}: target architecture is not allowed")
+
+    tag = str(status.get("upstream_release") or "")
+    strategy = cfg.get("release")
+    if strategy == "tag":
+        expected_tag = format_template(cfg["tag_template"], values).replace("\\", "")
+        if tag != expected_tag:
+            raise ProviderError(
+                "incompatible", f"{provider}: frozen release {tag!r} violates required tag {expected_tag!r}"
+            )
+    elif strategy != "latest":
+        raise ProviderError("unresolved", f"{provider}: unsupported release strategy {strategy!r}")
+
+    info = parse_version(str(capabilities.get("target_version") or ""))
+    matches = match_assets(provider, cfg, release, values, info.target_series)
+    expected_assets = {(asset.get("id"), asset.get("name")) for asset in matches}
+    recorded_assets = {
+        (record.get("asset_id"), record.get("asset"))
+        for record in status.get("assets", []) if isinstance(record, dict)
+    }
+    if recorded_assets != expected_assets:
+        raise ProviderError(
+            "unresolved", f"{provider}: frozen evidence does not contain the complete policy-matched asset set"
+        )
+    return matches
+
+
 def revalidate_status_provenance(
     provider: str,
     cfg: dict[str, Any],
@@ -432,11 +492,13 @@ def revalidate_status_provenance(
     release = release_metadata(provider, pinned_cfg, values)
     if release.get("id") != status.get("release_id") or release.get("tag_name") != tag:
         raise ProviderError("unresolved", f"{provider}: release identity is not authenticated")
+    validate_frozen_release(provider, cfg, release, status, capabilities, values)
     upstream_assets = {
         (asset.get("id"), asset.get("name")): asset
         for asset in release.get("assets", []) if isinstance(asset, dict)
     }
     produced: dict[str, str] = {}
+    verified_metadata: dict[str, dict[str, Any]] = {}
     with tempfile.TemporaryDirectory(prefix=f"verify-{provider}-") as temp_name:
         temp = Path(temp_name)
         records = status.get("assets", [])
@@ -466,7 +528,33 @@ def revalidate_status_provenance(
             else:
                 raise ProviderError("unresolved", f"{provider}: unsupported evidence asset")
             for output in outputs:
-                produced[f"{provider}/{output.name}"] = sha256_file(output)
+                relative = f"{provider}/{output.name}"
+                produced[relative] = sha256_file(output)
+                with output.open("rb") as package_file:
+                    if package_file.read(3) != b"ADB":
+                        raise ProviderError("incompatible", f"{provider}: re-downloaded output is not APK v3")
+                metadata, warning = inspect_apk_metadata(output)
+                if metadata is None:
+                    raise ProviderError(
+                        "unresolved", f"{provider}: consumer cannot verify APK metadata: {warning or output.name}"
+                    )
+                missing_fields = [
+                    field for field in ("name", "arch", "version", "dependencies")
+                    if field not in metadata or metadata[field] is None or metadata[field] == ""
+                ]
+                if missing_fields or not isinstance(metadata.get("dependencies"), list):
+                    raise ProviderError(
+                        "unresolved", f"{provider}: consumer APK metadata is incomplete for {output.name}"
+                    )
+                if metadata["name"] not in cfg.get("packages", []):
+                    raise ProviderError(
+                        "incompatible", f"{provider}: APK package name {metadata['name']!r} is not declared"
+                    )
+                if metadata["arch"] not in {"all", "noarch", capabilities.get("arch")}:
+                    raise ProviderError(
+                        "incompatible", f"{provider}: APK architecture {metadata['arch']!r} is incompatible"
+                    )
+                verified_metadata[relative] = metadata
 
     checks = status.get("apk_checks", [])
     if not isinstance(checks, list) or not checks:
@@ -479,6 +567,18 @@ def revalidate_status_provenance(
         if relative.is_absolute() or len(relative.parts) != 2 or relative.parts[0] != provider or ".." in relative.parts:
             raise ProviderError("unresolved", f"{provider}: unsafe APK evidence path")
         expected_apks[relative.as_posix()] = str(check.get("sha256") or "")
+        metadata = verified_metadata.get(relative.as_posix())
+        if (
+            check.get("metadata_status") != "verified"
+            or metadata is None
+            or check.get("package") != metadata.get("name")
+            or check.get("architecture") != metadata.get("arch")
+            or check.get("version") != metadata.get("version")
+            or check.get("dependencies") != metadata.get("dependencies")
+        ):
+            raise ProviderError(
+                "unresolved", f"{provider}: status APK metadata does not match consumer verification"
+            )
     if produced != expected_apks:
         raise ProviderError("unresolved", f"{provider}: APK extraction evidence does not match upstream asset")
     actual_bundled = {
@@ -488,6 +588,8 @@ def revalidate_status_provenance(
     }
     if actual_bundled != expected_apks:
         raise ProviderError("unresolved", f"{provider}: bundled APK bytes do not match upstream evidence")
+    if {metadata["name"] for metadata in verified_metadata.values()} != set(cfg.get("packages", [])):
+        raise ProviderError("unresolved", f"{provider}: verified APK package set is incomplete")
     return str(status.get("evidence_digest") or "")
 
 
@@ -655,7 +757,8 @@ def main() -> int:
                     raise ProviderError("unresolved", f"{provider}: no APK was produced")
 
                 apk_checks = validate_and_publish_apks(
-                    provider, output_apks, capabilities, args.destination
+                    provider, output_apks, capabilities, args.destination,
+                    set(cfg.get("packages", [])),
                 )
                 warnings: list[str] = []
                 records.extend(provider_records)
