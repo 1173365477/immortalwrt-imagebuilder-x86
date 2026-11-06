@@ -4,6 +4,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+from jsonschema import Draft202012Validator
+
 from migration_plan import canonical_digest, generate_plan, write_legacy_outputs
 
 
@@ -40,7 +42,10 @@ def official_index():
 
 def test_full_snapshot_to_release_to_plan_strict_positive(tmp_path):
     index = official_index()
-    plan = generate_plan(snapshot(), target(index), index, rules(), strict_mode=True)
+    source = snapshot()
+    Draft202012Validator(json.loads((ROOT / "schemas/system-snapshot-v1.json").read_text())).validate(source)
+    plan = generate_plan(source, target(index), index, rules(), strict_mode=True)
+    Draft202012Validator(json.loads((ROOT / "schemas/migration-plan-v1.json").read_text())).validate(plan)
     assert plan["status"] == "ok"
     assert plan["build_allowed"] is True
     assert plan["flash_ready"] is False
