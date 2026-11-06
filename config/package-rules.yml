@@ -1,3 +1,11 @@
+schema_version: 1.0.0
+unresolved_policy: block
+opkg_to_apk_name_match_is_compatibility: false
+
+# Explicit exclusions are allowed only when policy names the package here.
+# User-supplied optional=true is never sufficient on its own.
+optional_exclusions: []
+
 replacements: {}
 
 # Fallback only. Replacement metadata emitted by the current owut report wins.

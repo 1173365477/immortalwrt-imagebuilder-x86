@@ -1,7 +1,22 @@
+schema_version: 1.0.0
+policy:
+  unknown_provider: unresolved
+  execute_upstream_scripts: false
+  opkg_to_apk_requires_binary_evidence: true
+  first_boot_trust: pinned-sha256-manifest
+
 providers:
   openclash:
+    rule_version: 1
     enabled: true
-    strict_compatibility: false
+    source_type: github_release
+    upstream: https://github.com/vernesong/OpenClash
+    install_path: imagebuilder-binary
+    package_format: apk
+    strict_compatibility: true
+    supported_distributions:
+      - immortalwrt
+      - openwrt
     supported_package_managers:
       - apk
     supported_architectures:
@@ -12,6 +27,12 @@ providers:
     asset_patterns:
       - ^luci-app-openclash-{openclash_version}\.apk$
     require_digest: true
+    compatibility_evidence:
+      - exact-version GitHub Release tag
+      - GitHub-provided SHA-256 asset digest
+      - APK v3 magic and package metadata
+      - target official dependency index
+    confidence: high
     packages:
       - luci-app-openclash
     official_dependencies:
@@ -28,7 +49,12 @@ providers:
       - unzip
 
   nikki:
+    rule_version: 1
     enabled: true
+    source_type: github_release
+    upstream: https://github.com/nikkinikki-org/OpenWrt-nikki
+    install_path: imagebuilder-binary
+    package_format: apk
     strict_compatibility: true
     supported_package_managers:
       - apk
@@ -39,6 +65,11 @@ providers:
     asset_patterns:
       - ^nikki_{arch}-openwrt-{target_series}\.tar\.gz$
     require_digest: true
+    compatibility_evidence:
+      - target-series and architecture encoded in release asset name
+      - GitHub-provided SHA-256 archive digest
+      - APK v3 magic and package metadata
+    confidence: high
     packages:
       - mihomo-meta
       - nikki
@@ -52,7 +83,12 @@ providers:
     official_dependencies: []
 
   lucky:
+    rule_version: 1
     enabled: true
+    source_type: github_release
+    upstream: https://github.com/leesonaa/build_luci-app-lucky
+    install_path: imagebuilder-binary
+    package_format: apk
     strict_compatibility: true
     supported_package_managers:
       - apk
@@ -66,6 +102,12 @@ providers:
       - ^luci-app-lucky-[^/]+_x86_64\.apk$
       - ^luci-i18n-lucky-zh-cn-[^/]+_x86_64\.apk$
     require_digest: true
+    compatibility_evidence:
+      - release notes declare target series
+      - architecture encoded in each asset name
+      - GitHub-provided SHA-256 asset digest
+      - APK v3 magic and package metadata
+    confidence: high
     packages:
       - lucky
       - luci-app-lucky

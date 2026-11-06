@@ -4,10 +4,41 @@ set -eu
 apk_dir="/root/thirdparty"
 [ -d "$apk_dir" ] || exit 0
 
-set -- "$apk_dir"/*.apk
+set -- "$apk_dir"/*/*.apk
 [ -e "$1" ] || exit 0
 
-logger -t thirdparty-bootstrap "installing bundled third-party APKs"
+manifest="$apk_dir/SHA256SUMS"
+[ -f "$manifest" ] || {
+  logger -t thirdparty-bootstrap "refusing unverified APKs: SHA256SUMS is missing"
+  exit 1
+}
+
+for package in "$@"; do
+  relative=${package#"$apk_dir"/}
+  case "$relative" in
+    */*/*|*[!A-Za-z0-9+_.@/-]*|'')
+      logger -t thirdparty-bootstrap "refusing unsafe APK filename"
+      exit 1
+      ;;
+  esac
+  awk -v expected="$relative" 'length($1) == 64 && $2 == expected { found=1 } END { exit !found }' "$manifest" || {
+    logger -t thirdparty-bootstrap "refusing APK absent from SHA256SUMS: $relative"
+    exit 1
+  }
+done
+
+manifest_count=$(wc -l < "$manifest" | tr -d ' ')
+[ "$manifest_count" -eq "$#" ] || {
+  logger -t thirdparty-bootstrap "refusing inconsistent third-party hash manifest"
+  exit 1
+}
+
+if ! (cd "$apk_dir" && sha256sum -c SHA256SUMS); then
+  logger -t thirdparty-bootstrap "refusing third-party APK with hash mismatch"
+  exit 1
+fi
+
+logger -t thirdparty-bootstrap "installing build-verified bundled third-party APKs"
 if ! apk add --allow-untrusted "$@"; then
   logger -t thirdparty-bootstrap "APK installation failed; files and this uci-defaults script are retained"
   exit 1
