@@ -15,10 +15,22 @@ local tool supports it—package metadata architecture validation. Official
 dependencies are checked against the frozen release index. A same-name OPKG
 and APK is never compatibility evidence by itself.
 
+`thirdparty-status.json` is evidence, not an assertion flag. A compatible row
+binds the provider and rule version to the exact target release-resolution and
+official-index digests, architecture, package manager, upstream release/assets,
+asset SHA-256 values, extracted APK checks and official dependency result. Its
+canonical evidence digest is revalidated by the Migration Plan generator, which
+also hashes the APK files actually present in `files/root/thirdparty`. A bare or
+stale `status: compatible`, evidence copied from another target, or a status
+without the matching bundled APK fails closed.
+
 Unknown providers, missing assets, wrong architecture/package manager,
 untrusted URLs, absent digests, missing official dependencies, ambiguous
 matches, unsafe archives and malformed APKs resolve to `unresolved` or
 `incompatible`. No upstream installation script is downloaded or executed.
+Selecting a provider without a configured rule emits an explicit unresolved
+row and fails strict mode. Selecting any provider also requires a non-empty,
+digest-matching official index; dependency validation is never skipped.
 
 The downloaded artifact digest is verified during preparation. Each extracted
 APK receives a second recorded SHA-256, and the exact `SHA256SUMS` file is

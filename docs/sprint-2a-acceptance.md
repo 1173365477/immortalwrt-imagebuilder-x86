@@ -9,8 +9,35 @@ Draft PR: <https://github.com/1173365477/immortalwrt-imagebuilder-x86/pull/22>
 | Task | Result | Evidence |
 |---|---|---|
 | T10 / #12 | PASS | Distribution-separated stable release discovery; authenticated profile, image, ImageBuilder and official indexes; frozen version/source/digests; size/time limits and TTL cache; future-version and negative fixtures. |
-| T11 / #13 | PASS | Versioned OpenClash/Lucky/Nikki rules; exact upstream, format, architecture, dependency and digest evidence; unsafe archive/URL rejection; build and first-boot hash checks; unknown providers unresolved. |
-| T12 / #14 | PASS | Direct snapshot input; explicit blocked legacy adapter; every installed package receives keep/replace/skip/review/block; strict identity/package/dependency/conflict/digest gates; legacy outputs preserved; storage remains a flash-stage risk; `flash_ready=false`. |
+| T11 / #13 | PASS | Versioned OpenClash/Lucky/Nikki rules; exact upstream, format, architecture, dependency and digest evidence; target-bound compatibility status; unsafe archive/URL rejection; build and first-boot hash checks; unknown providers unresolved. |
+| T12 / #14 | PASS | Direct snapshot input; explicit blocked legacy adapter; every installed package receives exactly one keep/replace/skip/review/block decision; third-party checks precede dependency omission; policy-proven exclusions only; strict identity/package/dependency/conflict/digest gates; legacy outputs preserved; storage remains a flash-stage risk; `flash_ready=false`. |
+
+## Independent re-review findings and remediation
+
+The review at `579f7cd7cb60d05874c47bab112d5e73d5014b94`
+reproduced four fail-open paths. They were not waived:
+
+1. Third-party packages marked as dependencies/defaults could be skipped before
+   provider verification. Third-party origin is now evaluated first. A
+   third-party dependency is kept only with complete target-bound evidence;
+   otherwise it is blocked.
+2. A bare external `status=compatible` could authorize a third-party package.
+   Compatible evidence now binds provider/rule/repository, target distribution,
+   exact release, target/profile/architecture/package manager, frozen release
+   and official-index digests, upstream asset URLs and SHA-256 values, APK
+   format/hash/architecture checks, the hashes of the APK files actually
+   bundled into the image, and official dependency resolution. The evidence
+   object has its own canonical digest and cannot be reused for a different
+   target.
+3. Selected unknown providers and a missing official index could evade checks.
+   Unknown selections now produce explicit `unresolved` states and fail strict
+   mode. A selected provider requires a non-empty official index whose digest
+   matches the frozen release; dependency absence is always checked.
+4. User input `optional=true` was sufficient for exclusion. Exclusions now
+   require a versioned `optional_exclusions` policy entry, reject system/network
+   protected packages and third-party plugins, and reject removal when another
+   installed package depends on it. Snapshot digest and source-version binding
+   remain mandatory.
 
 ## Safety properties and blockers
 
@@ -30,6 +57,15 @@ Draft PR: <https://github.com/1173365477/immortalwrt-imagebuilder-x86/pull/22>
   a GitHub-provided asset digest, records extracted APK digests, and verifies
   the exact manifest again at first boot. A locally signed repository remains
   a future hardening option; the limitation is not hidden.
+
+## Cross-package-manager boundary
+
+Sprint 2A does **not** implement a general OPKG-to-APK migration. Same-name
+official or third-party packages are not sufficient evidence. When source and
+target package managers differ, a package needs an explicit versioned
+replacement/binary compatibility mapping; without it the decision is
+`review`/`block` and `build_allowed=false`. This is a verified safety gate, not
+a claim that cross-manager migration is implemented.
 
 ## Compatibility outputs
 

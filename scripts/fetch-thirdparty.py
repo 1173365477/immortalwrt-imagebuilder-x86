@@ -34,6 +34,11 @@ class ProviderError(RuntimeError):
         self.reason = reason
 
 
+def canonical_digest(value: Any) -> str:
+    data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(data).hexdigest()
+
+
 def api_json(url: str) -> Any:
     headers = {
         "Accept": "application/vnd.github+json",
@@ -285,7 +290,7 @@ def render_compatibility_report(
         f"{capabilities.get('official_package_count', 'unknown')} indexed packages; package manager {capabilities['package_manager']} |",
     ]
     for provider, status in sorted(statuses.items()):
-        detail = status.get("reason") or status.get("release") or "assets verified"
+        detail = status.get("reason") or status.get("upstream_release") or "assets verified"
         rows.append(f"| {provider} | {capabilities['target_series']} | {status['status']} | {detail} |")
     return "\n".join(rows) + "\n"
 
@@ -303,10 +308,85 @@ def strict_exit_code(
 ) -> int:
     """Return failure only when strict mode sees a requested degraded provider."""
     degraded = any(
-        provider in selected and status["status"] != "compatible"
-        for provider, status in statuses.items()
+        statuses.get(provider, {}).get("status") != "compatible"
+        for provider in selected
     )
     return 1 if strict and degraded else 0
+
+
+def compatible_status(
+    provider: str,
+    cfg: dict[str, Any],
+    capabilities: dict[str, Any],
+    release: dict[str, Any],
+    asset_records: list[dict[str, Any]],
+    apk_checks: list[dict[str, Any]],
+    official_index_digest: str,
+    warnings: list[str],
+) -> dict[str, Any]:
+    required_dependencies = sorted(set(cfg.get("official_dependencies", [])))
+    status: dict[str, Any] = {
+        "status": "compatible",
+        "provider": provider,
+        "rule_version": cfg["rule_version"],
+        "repository": cfg["repository"],
+        "packages": sorted(cfg.get("packages", [])),
+        "target": {
+            "distribution": capabilities.get("distribution"),
+            "version": capabilities.get("target_version"),
+            "target": capabilities.get("target"),
+            "profile": capabilities.get("profile"),
+            "architecture": capabilities.get("arch"),
+            "package_manager": capabilities.get("package_manager"),
+            "resolution_digest": capabilities.get("resolution_digest"),
+            "official_index_digest": official_index_digest,
+        },
+        "upstream_release": release.get("tag_name", ""),
+        "assets": asset_records,
+        "apk_checks": apk_checks,
+        "official_dependencies": {
+            "required": required_dependencies,
+            "missing": [],
+            "index_digest": official_index_digest,
+        },
+        "warnings": warnings,
+    }
+    status["evidence_digest"] = canonical_digest(status)
+    return status
+
+
+def unknown_provider_statuses(
+    selected: set[str], configured: set[str]
+) -> dict[str, dict[str, Any]]:
+    return {
+        provider: {
+            "status": "unresolved",
+            "provider": provider,
+            "reason": "selected provider has no trusted versioned rule",
+        }
+        for provider in sorted(selected - configured)
+    }
+
+
+def load_official_index(
+    path: Path, capabilities: dict[str, Any], *, required: bool
+) -> tuple[dict[str, Any], str]:
+    if required and not path.exists():
+        raise ProviderError(
+            "unresolved", "official package index is required for third-party dependency validation"
+        )
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ProviderError("unresolved", f"invalid official package index: {exc}") from exc
+    if required and (not isinstance(value, dict) or not value):
+        raise ProviderError("unresolved", "official package index is empty or invalid")
+    digest = canonical_digest(value)
+    if required and capabilities.get("official_index_digest") != digest:
+        raise ProviderError(
+            "unresolved", "official package index digest does not match release capabilities"
+        )
+    return value, digest
 
 
 def main() -> int:
@@ -360,7 +440,19 @@ def main() -> int:
     statuses: dict[str, dict[str, Any]] = {}
     values = template_values(args.version, capabilities, args.openclash_version)
     official_index = args.capabilities.parent / "official-package-index.json"
-    official_packages = set(json.loads(official_index.read_text(encoding="utf-8"))) if official_index.exists() else set()
+    try:
+        official_index_data, official_index_digest = load_official_index(
+            official_index, capabilities, required=bool(selected)
+        )
+    except ProviderError as exc:
+        print(f"::error::{exc.reason}")
+        return 2
+    official_packages = set(official_index_data)
+
+    unknown_statuses = unknown_provider_statuses(selected, set(config))
+    statuses.update(unknown_statuses)
+    for provider in unknown_statuses:
+        print(f"::warning title={provider} unresolved::selected provider has no trusted versioned rule")
 
     with tempfile.TemporaryDirectory(prefix="thirdparty-") as temp_name:
         temp = Path(temp_name)
@@ -385,7 +477,7 @@ def main() -> int:
                         "incompatible", f"provider does not support target architecture {capabilities['arch']}"
                     )
                 absent_dependencies = sorted(set(cfg.get("official_dependencies", [])) - official_packages)
-                if official_packages and absent_dependencies:
+                if absent_dependencies:
                     raise ProviderError(
                         "incompatible",
                         "target official feeds lack provider dependencies: " + ", ".join(absent_dependencies),
@@ -422,7 +514,7 @@ def main() -> int:
                 if not output_apks:
                     raise ProviderError("unresolved", f"{provider}: no APK was produced")
 
-                metadata_rows: list[dict[str, Any]] = []
+                apk_checks: list[dict[str, Any]] = []
                 warnings: list[str] = []
                 for path in output_apks:
                     with path.open("rb") as package_file:
@@ -430,27 +522,36 @@ def main() -> int:
                     if path.stat().st_size < 4 or magic != b"ADB":
                         raise ProviderError("incompatible", f"downloaded file is not an APK v3 package: {path.name}")
                     metadata, warning = inspect_apk_metadata(path)
+                    apk_check: dict[str, Any] = {
+                        "file": path.name,
+                        "sha256": sha256_file(path),
+                        "magic_verified": True,
+                        "metadata_status": "verified" if metadata else "unavailable",
+                        "architecture": "unknown",
+                    }
                     if metadata:
                         arch = metadata.get("arch")
                         if arch and arch not in {"all", "noarch", capabilities["arch"]}:
                             raise ProviderError(
                                 "incompatible", f"APK {path.name} architecture {arch} conflicts with {capabilities['arch']}"
                             )
-                        metadata_rows.append({"file": path.name, **metadata})
+                        apk_check["architecture"] = arch or "unknown"
+                        apk_check["package"] = metadata.get("name")
+                        apk_check["version"] = metadata.get("version")
+                        apk_check["dependencies"] = metadata.get("dependencies", [])
                     if warning and warning not in warnings:
                         warnings.append(warning)
                     destination = args.destination / path.name
                     if destination.exists():
                         raise ProviderError("unresolved", f"duplicate third-party APK filename: {path.name}")
                     shutil.copy2(path, destination)
+                    apk_checks.append(apk_check)
                 records.extend(provider_records)
-                statuses[provider] = {
-                    "status": "compatible",
-                    "release": release.get("tag_name", ""),
-                    "assets": [asset["name"] for asset in assets],
-                    "apk_metadata": metadata_rows,
-                    "warnings": warnings,
-                }
+                statuses[provider] = compatible_status(
+                    provider, cfg, capabilities, release, provider_records,
+                    apk_checks, official_index_digest,
+                    warnings,
+                )
             except ProviderError as exc:
                 statuses[provider] = {"status": exc.status, "reason": exc.reason}
                 print(f"::warning title={provider} {exc.status}::{exc.reason}")
@@ -476,7 +577,7 @@ def main() -> int:
     )
     print("Third-party compatibility:")
     for provider, status in sorted(statuses.items()):
-        print(f"  {provider}: {status['status']} - {status.get('reason') or status.get('release', '')}")
+        print(f"  {provider}: {status['status']} - {status.get('reason') or status.get('upstream_release', '')}")
     print("Third-party APK files:")
     for path in apk_files:
         print(f"  {path.name}")

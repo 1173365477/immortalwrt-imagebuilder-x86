@@ -11,6 +11,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from migration_plan import generate_plan, write_legacy_outputs
+from release_utils import sha256_file
 
 
 def load(path: Path):
@@ -23,7 +24,9 @@ def main() -> int:
     parser.add_argument("--capabilities", type=Path, default=Path("generated/release-capabilities.json"))
     parser.add_argument("--official-index", type=Path, default=Path("generated/official-package-index.json"))
     parser.add_argument("--thirdparty-rules", type=Path, default=Path("config/thirdparty.yml"))
+    parser.add_argument("--package-rules", type=Path, default=Path("config/package-rules.yml"))
     parser.add_argument("--thirdparty-status", type=Path)
+    parser.add_argument("--thirdparty-dir", type=Path, default=Path("files/root/thirdparty"))
     parser.add_argument("--exclusions", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("generated"))
     parser.add_argument("--strict", action=argparse.BooleanOptionalAction, default=True)
@@ -33,10 +36,15 @@ def main() -> int:
         snapshot = load(args.snapshot)
         Draft202012Validator(load(root / "schemas/system-snapshot-v1.json")).validate(snapshot)
         status = load(args.thirdparty_status) if args.thirdparty_status else {}
+        thirdparty_files = {
+            path.name: sha256_file(path) for path in sorted(args.thirdparty_dir.glob("*.apk"))
+        }
         exclusions = load(args.exclusions) if args.exclusions else []
         plan = generate_plan(
             snapshot, load(args.capabilities), load(args.official_index),
             yaml.safe_load(args.thirdparty_rules.read_text()), status, exclusions,
+            package_rules=yaml.safe_load(args.package_rules.read_text()),
+            thirdparty_files=thirdparty_files,
             strict_mode=args.strict,
         )
         Draft202012Validator(load(root / "schemas/migration-plan-v1.json")).validate(plan)

@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
-  "plan_id": "urn:sha256:979a087e7a43b22e44d6de10f54c138beaece4dde4ebc6afc006095cc12bbc8d",
-  "digest": "979a087e7a43b22e44d6de10f54c138beaece4dde4ebc6afc006095cc12bbc8d",
+  "plan_id": "urn:sha256:c7ce9f22abd255e2552a88f2a26aa2dcb4a61c5bc569e6e6aa27663c20afe76f",
+  "digest": "c7ce9f22abd255e2552a88f2a26aa2dcb4a61c5bc569e6e6aa27663c20afe76f",
   "source_snapshot_id": "urn:sha256:1111111111111111111111111111111111111111111111111111111111111111",
   "source_snapshot_digest": "1111111111111111111111111111111111111111111111111111111111111111",
   "status": "ok",
@@ -85,7 +85,7 @@
       "decision": "skip",
       "match_type": "dependency_recalculation",
       "compatible": true,
-      "reason": "target resolver will recalculate defaults and automatic dependencies"
+      "reason": "same-package-manager target index proves the resolver can recalculate this official default/dependency"
     },
     {
       "package": "ca-bundle",
@@ -103,7 +103,7 @@
       "decision": "skip",
       "match_type": "dependency_recalculation",
       "compatible": true,
-      "reason": "target resolver will recalculate defaults and automatic dependencies"
+      "reason": "same-package-manager target index proves the resolver can recalculate this official default/dependency"
     },
     {
       "package": "curl",

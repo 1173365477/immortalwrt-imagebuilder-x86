@@ -5,9 +5,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+
+
+SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+PROTECTED_PACKAGES = {
+    "apk", "opkg", "base-files", "busybox", "procd", "ubus", "uci",
+    "netifd", "firewall4", "dnsmasq", "dnsmasq-full", "odhcpd", "dropbear",
+}
 
 
 def canonical_digest(value: Any) -> str:
@@ -52,6 +61,102 @@ def _metadata_list(metadata: Any, key: str) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
 
 
+def _thirdparty_compatibility(
+    provider: str,
+    package: str,
+    provider_rule: dict[str, Any],
+    status: dict[str, Any],
+    capabilities: dict[str, Any],
+    official_index: dict[str, Any],
+    thirdparty_files: dict[str, str],
+    source_dependencies: set[str],
+) -> tuple[bool, str]:
+    if status.get("status") != "compatible":
+        return False, "provider status is not compatible"
+    evidence_digest = status.get("evidence_digest")
+    payload = dict(status)
+    payload.pop("evidence_digest", None)
+    if not SHA256_RE.fullmatch(str(evidence_digest or "")) or canonical_digest(payload) != evidence_digest:
+        return False, "provider compatibility evidence digest is missing or inconsistent"
+    if status.get("provider") != provider or status.get("rule_version") != provider_rule.get("rule_version"):
+        return False, "provider identity or rule version does not match"
+    if status.get("repository") != provider_rule.get("repository"):
+        return False, "provider repository does not match the trusted rule"
+    if package not in status.get("packages", []) or package not in provider_rule.get("packages", []):
+        return False, "provider evidence does not cover this package"
+
+    target = status.get("target")
+    expected_target = {
+        "distribution": capabilities.get("distribution"),
+        "version": capabilities.get("target_version"),
+        "target": capabilities.get("target"),
+        "profile": capabilities.get("profile"),
+        "architecture": capabilities.get("arch"),
+        "package_manager": capabilities.get("package_manager"),
+        "resolution_digest": capabilities.get("resolution_digest"),
+        "official_index_digest": capabilities.get("official_index_digest"),
+    }
+    if target != expected_target:
+        return False, "provider evidence is bound to a different target release or architecture"
+    if capabilities.get("official_index_digest") != canonical_digest(official_index):
+        return False, "official dependency index digest is inconsistent"
+
+    dependency_evidence = status.get("official_dependencies")
+    required = sorted(set(provider_rule.get("official_dependencies", [])))
+    if not isinstance(dependency_evidence, dict):
+        return False, "official dependency evidence is missing"
+    if dependency_evidence.get("required") != required or dependency_evidence.get("missing") != []:
+        return False, "official dependency resolution is incomplete"
+    if dependency_evidence.get("index_digest") != capabilities.get("official_index_digest"):
+        return False, "official dependency evidence uses a different index"
+    absent = sorted(set(required) - set(official_index))
+    if absent:
+        return False, "official dependencies are absent: " + ", ".join(absent)
+    unresolved_source_dependencies = sorted(
+        source_dependencies - set(official_index) - set(provider_rule.get("packages", []))
+    )
+    if unresolved_source_dependencies:
+        return False, "source package dependencies are unresolved: " + ", ".join(unresolved_source_dependencies)
+
+    assets = status.get("assets")
+    if not isinstance(assets, list) or not assets:
+        return False, "verified upstream asset evidence is missing"
+    repository_prefix = f"/{provider_rule.get('repository')}/releases/download/"
+    for asset in assets:
+        parsed = urlparse(str(asset.get("url") or "")) if isinstance(asset, dict) else None
+        if (
+            not isinstance(asset, dict)
+            or asset.get("provider") != provider
+            or not asset.get("asset")
+            or not SHA256_RE.fullmatch(str(asset.get("sha256") or ""))
+            or parsed is None
+            or parsed.scheme != "https"
+            or parsed.netloc != "github.com"
+            or not parsed.path.startswith(repository_prefix)
+        ):
+            return False, "upstream asset identity or SHA-256 evidence is invalid"
+
+    apk_checks = status.get("apk_checks")
+    if not isinstance(apk_checks, list) or not apk_checks:
+        return False, "APK validation evidence is missing"
+    target_arch = capabilities.get("arch")
+    for check in apk_checks:
+        if (
+            not isinstance(check, dict)
+            or not str(check.get("file") or "").endswith(".apk")
+            or check.get("magic_verified") is not True
+            or check.get("metadata_status") not in {"verified", "unavailable"}
+            or not SHA256_RE.fullmatch(str(check.get("sha256") or ""))
+            or check.get("architecture") not in {"all", "noarch", "unknown", target_arch}
+        ):
+            return False, "APK hash, format, or architecture evidence is invalid"
+        if thirdparty_files.get(check["file"]) != check["sha256"]:
+            return False, "bundled APK is missing or does not match compatibility evidence"
+    if not status.get("upstream_release"):
+        return False, "upstream release identity is missing"
+    return True, "verified provider, release, asset, APK, architecture and dependency evidence matched"
+
+
 def generate_plan(
     snapshot: dict[str, Any],
     capabilities: dict[str, Any],
@@ -60,10 +165,14 @@ def generate_plan(
     thirdparty_status: dict[str, Any] | None = None,
     exclusions: list[dict[str, Any]] | None = None,
     *,
+    package_rules: dict[str, Any] | None = None,
+    thirdparty_files: dict[str, str] | None = None,
     strict_mode: bool = True,
 ) -> dict[str, Any]:
     thirdparty_status = thirdparty_status or {}
     exclusions = exclusions or []
+    package_rules = package_rules or {}
+    thirdparty_files = thirdparty_files or {}
     blockers: list[str] = []
     warnings = list(snapshot.get("warnings", []))
     errors = list(snapshot.get("errors", []))
@@ -89,6 +198,8 @@ def generate_plan(
         blockers.append("target platform build support is not established")
     if capabilities.get("official_index_digest") != canonical_digest(official_index):
         errors.append("official package index digest mismatch")
+    if not official_index:
+        errors.append("official package index is missing or empty")
 
     system = snapshot.get("system", {})
     compatibility = "compatible"
@@ -121,15 +232,22 @@ def generate_plan(
     replacements = {}
     target_version = str(capabilities.get("target_version") or "")
     series = ".".join(target_version.split(".")[:2])
-    replacements.update(thirdparty_rules.get("replacements", {}))
+    replacements.update(package_rules.get("replacements", {}))
     replacements.update(
-        thirdparty_rules.get("version_rules", {}).get(series, {}).get("replacements", {})
+        package_rules.get("version_rules", {}).get(series, {}).get("replacements", {})
     )
     decisions: list[dict[str, Any]] = []
     installed_names = {row["name"] for row in package_set.get("installed", [])}
     for excluded in sorted(set(exclusion_map) - installed_names):
         errors.append(f"explicit exclusion names package not present in snapshot: {excluded}")
     top_level = set(package_set.get("top_level", []))
+    protected_packages = PROTECTED_PACKAGES | set(package_rules.get("always_keep", []))
+    optional_exclusions = set(package_rules.get("optional_exclusions", []))
+    required_by: dict[str, set[str]] = {}
+    for installed in package_set.get("installed", []):
+        for dependency in installed.get("depends", []):
+            if dependency.get("relation") == "package" and dependency.get("name"):
+                required_by.setdefault(dependency["name"], set()).add(installed["name"])
 
     for package in package_set.get("installed", []):
         name = package["name"]
@@ -146,11 +264,53 @@ def generate_plan(
             "conflicts": [],
             "evidence": evidence,
         }
+        provider = provider_map.get(name)
+        is_thirdparty = bool(provider or package.get("origin") == "third_party")
         if name in exclusion_map:
             row = exclusion_map[name]
+            dependents = sorted(required_by.get(name, set()) - set(exclusion_map))
+            if is_thirdparty:
+                reason = "third-party package exclusion is safety-critical and cannot be treated as compatible"
+            elif name in protected_packages:
+                reason = "system-critical or explicitly preserved package cannot be excluded"
+            elif dependents:
+                reason = "exclusion would break required packages: " + ", ".join(dependents)
+            elif name not in optional_exclusions:
+                reason = "package is not proven optional by the versioned package policy"
+            else:
+                decisions.append(
+                    {**base, "evidence": [*evidence, "package-policy:optional_exclusions"], "decision": "skip", "match_type": "explicit_exclusion", "compatible": True, "reason": row["reason"]}
+                )
+                continue
             decisions.append(
-                {**base, "decision": "skip", "match_type": "explicit_exclusion", "compatible": True, "reason": row["reason"]}
+                {**base, "decision": "block", "match_type": "unresolved", "compatible": None, "reason": reason}
             )
+            blockers.append(f"explicit exclusion rejected for {name}: {reason}")
+            continue
+        if is_thirdparty:
+            base["provider"] = provider
+            provider_rule = thirdparty_rules.get("providers", {}).get(provider or "", {})
+            status = thirdparty_status.get(provider or "", {})
+            verified, reason = _thirdparty_compatibility(
+                provider or "", name, provider_rule, status, capabilities,
+                official_index, thirdparty_files,
+                {
+                    dependency["name"] for dependency in package.get("depends", [])
+                    if dependency.get("relation") == "package" and dependency.get("name")
+                },
+            )
+            if verified and not (package.get("install_reason") == "manual" and name not in top_level):
+                evidence.append(f"thirdparty-evidence:{status['evidence_digest']}")
+                decisions.append(
+                    {**base, "evidence": evidence, "decision": "keep", "target_package": name, "match_type": "third_party", "compatible": True, "reason": reason}
+                )
+            else:
+                if verified:
+                    reason = "manual third-party package is absent from the complete top-level manifest"
+                decisions.append(
+                    {**base, "decision": "block", "match_type": "unresolved", "compatible": None, "reason": reason}
+                )
+                blockers.append(f"required third-party package {name} is unresolved: {reason}")
             continue
         if package.get("install_reason") == "manual" and name not in top_level:
             decisions.append(
@@ -159,23 +319,17 @@ def generate_plan(
             blockers.append(f"manual package {name} may be silently omitted")
             continue
         if package.get("install_reason") in {"dependency", "system_default"}:
-            decisions.append(
-                {**base, "decision": "skip", "match_type": "dependency_recalculation", "compatible": True, "reason": "target resolver will recalculate defaults and automatic dependencies"}
-            )
-            continue
-        provider = provider_map.get(name)
-        if provider or package.get("origin") == "third_party":
-            base["provider"] = provider
-            status = thirdparty_status.get(provider or "", {}).get("status")
-            if provider and status == "compatible":
+            metadata = official_index.get(name)
+            same_manager = system.get("package_manager") == capabilities.get("package_manager")
+            if package.get("origin") == "official" and metadata is not None and same_manager:
                 decisions.append(
-                    {**base, "decision": "keep", "target_package": name, "match_type": "third_party", "compatible": True, "reason": f"versioned {provider} rule and verified asset evidence matched"}
+                    {**base, "decision": "skip", "match_type": "dependency_recalculation", "compatible": True, "reason": "same-package-manager target index proves the resolver can recalculate this official default/dependency"}
                 )
             else:
                 decisions.append(
-                    {**base, "decision": "block", "match_type": "unresolved", "compatible": None, "reason": "required third-party source or compatibility evidence is unresolved"}
+                    {**base, "decision": "block", "match_type": "unresolved", "compatible": None, "reason": "dependency/default omission lacks trusted target index and package-manager evidence"}
                 )
-                blockers.append(f"required third-party package {name} is unresolved")
+                blockers.append(f"dependency/default package {name} cannot be safely omitted")
             continue
         replacement = replacements.get(name)
         if replacement:

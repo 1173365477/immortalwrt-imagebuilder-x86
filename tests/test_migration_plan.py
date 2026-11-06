@@ -33,7 +33,50 @@ def target(index):
 
 
 def rules():
-    return {"providers": {"openclash": {"packages": ["luci-app-openclash"]}}}
+    return {"providers": {"openclash": {
+        "rule_version": 1,
+        "repository": "vernesong/OpenClash",
+        "packages": ["luci-app-openclash"],
+        "official_dependencies": ["ca-bundle"],
+    }}}
+
+
+def trusted_status(capabilities, index, package="luci-app-openclash"):
+    status = {
+        "status": "compatible",
+        "provider": "openclash",
+        "rule_version": 1,
+        "repository": "vernesong/OpenClash",
+        "packages": [package],
+        "target": {
+            "distribution": capabilities["distribution"],
+            "version": capabilities["target_version"],
+            "target": capabilities["target"],
+            "profile": capabilities["profile"],
+            "architecture": capabilities["arch"],
+            "package_manager": capabilities["package_manager"],
+            "resolution_digest": capabilities["resolution_digest"],
+            "official_index_digest": capabilities["official_index_digest"],
+        },
+        "upstream_release": "v0.48.002",
+        "assets": [{
+            "provider": "openclash", "release": "v0.48.002",
+            "asset": "luci-app-openclash-0.48.002.apk", "sha256": HEX,
+            "url": "https://github.com/vernesong/OpenClash/releases/download/v0.48.002/luci-app-openclash-0.48.002.apk",
+        }],
+        "apk_checks": [{
+            "file": "luci-app-openclash-0.48.002.apk", "sha256": HEX,
+            "magic_verified": True, "metadata_status": "verified",
+            "architecture": "noarch",
+        }],
+        "official_dependencies": {
+            "required": ["ca-bundle"], "missing": [],
+            "index_digest": canonical_digest(index),
+        },
+        "warnings": [],
+    }
+    status["evidence_digest"] = canonical_digest(status)
+    return {"openclash": status}
 
 
 def official_index():
@@ -110,12 +153,139 @@ def test_unknown_thirdparty_is_not_silently_skipped():
     assert plan["build_allowed"] is False
 
 
-def test_explicit_optional_exclusion_is_snapshot_bound():
+def test_thirdparty_dependency_requires_and_accepts_bound_evidence():
     data = snapshot()
-    exclusion = {"package": "curl", "source_version": "25.12.2", "snapshot_digest": "1" * 64, "reason": "operator intentionally omits optional curl", "optional": True}
+    package = data["packages"]["installed"][-1]
+    package.update(name="luci-app-openclash", origin="third_party", install_reason="dependency")
+    data["packages"]["top_level"] = []
     index = official_index()
-    plan = generate_plan(data, target(index), index, rules(), exclusions=[exclusion])
-    row = next(row for row in plan["decisions"] if row["package"] == "curl")
+    capabilities = target(index)
+    status = trusted_status(capabilities, index)
+    plan = generate_plan(
+        data, capabilities, index, rules(), status,
+        thirdparty_files={"luci-app-openclash-0.48.002.apk": HEX},
+    )
+    row = next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")
+    assert row["decision"] == "keep"
+    assert plan["build_allowed"] is True
+    assert len(plan["decisions"]) == len(data["packages"]["installed"])
+
+
+def test_thirdparty_dependency_without_evidence_is_blocked_not_skipped():
+    data = snapshot()
+    package = data["packages"]["installed"][-1]
+    package.update(name="luci-app-openclash", origin="third_party", install_reason="dependency")
+    data["packages"]["top_level"] = []
+    index = official_index()
+    plan = generate_plan(data, target(index), index, rules(), {})
+    row = next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")
+    assert row["decision"] == "block"
+    assert row["match_type"] == "unresolved"
+
+
+def test_forged_compatible_status_cannot_bypass_gate():
+    data = snapshot()
+    data["packages"]["installed"][-1].update(name="luci-app-openclash", origin="third_party")
+    data["packages"]["top_level"] = ["luci-app-openclash"]
+    index = official_index()
+    forged = {"openclash": {"status": "compatible"}}
+    plan = generate_plan(data, target(index), index, rules(), forged)
+    assert plan["build_allowed"] is False
+    assert next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")["decision"] == "block"
+
+
+def test_structurally_complete_status_without_matching_apk_cannot_bypass_gate():
+    data = snapshot()
+    data["packages"]["installed"][-1].update(name="luci-app-openclash", origin="third_party")
+    data["packages"]["top_level"] = ["luci-app-openclash"]
+    index = official_index()
+    capabilities = target(index)
+    plan = generate_plan(data, capabilities, index, rules(), trusted_status(capabilities, index))
+    row = next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")
+    assert row["decision"] == "block"
+    assert "bundled APK" in row["reason"]
+
+
+def test_compatible_status_cannot_be_reused_for_other_release():
+    data = snapshot()
+    data["packages"]["installed"][-1].update(name="luci-app-openclash", origin="third_party")
+    data["packages"]["top_level"] = ["luci-app-openclash"]
+    index = official_index()
+    original = target(index)
+    status = trusted_status(original, index)
+    changed = target(index)
+    changed["target_version"] = "25.12.3"
+    frozen = dict(changed)
+    frozen.pop("resolution_digest")
+    changed["resolution_digest"] = canonical_digest(frozen)
+    plan = generate_plan(
+        data, changed, index, rules(), status,
+        thirdparty_files={"luci-app-openclash-0.48.002.apk": HEX},
+    )
+    assert plan["build_allowed"] is False
+    assert any("different target release" in row["reason"] for row in plan["decisions"] if row["package"] == "luci-app-openclash")
+
+
+def test_thirdparty_compatible_status_cannot_hide_missing_official_dependency():
+    data = snapshot()
+    data["packages"]["installed"][-1].update(name="luci-app-openclash", origin="third_party")
+    data["packages"]["top_level"] = ["luci-app-openclash"]
+    index = official_index()
+    capabilities = target(index)
+    provider_rules = rules()
+    provider_rules["providers"]["openclash"]["official_dependencies"] = ["ca-bundle", "missing-runtime"]
+    statuses = trusted_status(capabilities, index)
+    status = statuses["openclash"]
+    status["official_dependencies"]["required"] = ["ca-bundle", "missing-runtime"]
+    status["evidence_digest"] = canonical_digest({key: value for key, value in status.items() if key != "evidence_digest"})
+    plan = generate_plan(
+        data, capabilities, index, provider_rules, statuses,
+        thirdparty_files={"luci-app-openclash-0.48.002.apk": HEX},
+    )
+    row = next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")
+    assert row["decision"] == "block"
+    assert "absent" in row["reason"]
+
+
+def test_user_optional_flag_cannot_exclude_protected_package():
+    data = snapshot()
+    exclusion = {"package": "busybox", "source_version": "25.12.2", "snapshot_digest": "1" * 64, "reason": "operator marked it optional", "optional": True}
+    index = official_index()
+    plan = generate_plan(
+        data, target(index), index, rules(), exclusions=[exclusion],
+        package_rules={"optional_exclusions": ["busybox"]},
+    )
+    row = next(row for row in plan["decisions"] if row["package"] == "busybox")
+    assert row["decision"] == "block"
+    assert plan["build_allowed"] is False
+
+
+def test_exclusion_cannot_break_another_required_package_dependency():
+    data = snapshot()
+    exclusion = {"package": "ca-bundle", "source_version": "25.12.2", "snapshot_digest": "1" * 64, "reason": "operator marked it optional", "optional": True}
+    index = official_index()
+    plan = generate_plan(
+        data, target(index), index, rules(), exclusions=[exclusion],
+        package_rules={"optional_exclusions": ["ca-bundle"]},
+    )
+    row = next(row for row in plan["decisions"] if row["package"] == "ca-bundle")
+    assert row["decision"] == "block"
+    assert "curl" in row["reason"]
+
+
+def test_policy_proven_optional_package_can_be_explicitly_excluded():
+    data = snapshot()
+    optional = dict(data["packages"]["installed"][-1])
+    optional.update(name="optional-tool", version="1", dependencies_raw=None, depends=[])
+    data["packages"]["installed"].append(optional)
+    data["packages"]["top_level"].append("optional-tool")
+    index = {**official_index(), "optional-tool": {"version": "1"}}
+    exclusion = {"package": "optional-tool", "source_version": "25.12.2", "snapshot_digest": "1" * 64, "reason": "versioned policy marks this tool optional", "optional": True}
+    plan = generate_plan(
+        data, target(index), index, rules(), exclusions=[exclusion],
+        package_rules={"optional_exclusions": ["optional-tool"]},
+    )
+    row = next(row for row in plan["decisions"] if row["package"] == "optional-tool")
     assert row["decision"] == "skip"
     assert plan["build_allowed"] is True
 
