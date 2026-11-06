@@ -18,6 +18,9 @@ def fixture_fetch(*, manager="apk", corrupt_index=False, arch="x86_64"):
     profiles_bytes = json.dumps(profiles, separators=(",", ":")).encode()
     target_index = json.dumps({"packages": {"base-files": {"version": "1"}}}).encode()
     feed_index = json.dumps({"packages": {"curl": {"version": "9", "depends": ["libc"]}}}).encode()
+    kmod_index = json.dumps({"packages": {"kmod-tun": {"version": "6.12"}}}).encode()
+    kernel = profiles["linux_kernel"]
+    kmod_directory = f"{kernel['version']}-{kernel['release']}-{kernel['vermagic']}"
     imagebuilder = "immortalwrt-imagebuilder-29.0.1-x86-64.Linux-x86_64.tar.zst"
     image = next(
         item for item in profiles["profiles"]["generic"]["images"]
@@ -28,6 +31,7 @@ def fixture_fetch(*, manager="apk", corrupt_index=False, arch="x86_64"):
         f"{'d' * 64}  {imagebuilder}\n"
         f"{image['sha256']}  {image['name']}\n"
         f"{hashlib.sha256(target_index).hexdigest()}  packages/index.json\n"
+        f"{hashlib.sha256(kmod_index).hexdigest()}  kmods/{kmod_directory}/index.json\n"
     ).encode()
     feed_sums = (
         f"{hashlib.sha256(feed_index).hexdigest()}  base/index.json\n"
@@ -37,6 +41,7 @@ def fixture_fetch(*, manager="apk", corrupt_index=False, arch="x86_64"):
         f"{base}/targets/x86/64/profiles.json": profiles_bytes,
         f"{base}/targets/x86/64/sha256sums": target_sums,
         f"{base}/targets/x86/64/packages/index.json": b"{}" if corrupt_index else target_index,
+        f"{base}/targets/x86/64/kmods/{kmod_directory}/index.json": kmod_index,
         f"{base}/packages/{arch}/sha256sums": feed_sums,
         f"{base}/packages/{arch}/base/index.json": feed_index,
     }
@@ -59,7 +64,7 @@ def test_future_release_is_pinned_with_verified_sources():
     assert capabilities["channel"] == "release"
     assert capabilities["resolution_digest"]
     assert all(source["sha256"] for source in capabilities["package_index_sources"])
-    assert set(packages) == {"base-files", "curl"}
+    assert set(packages) == {"base-files", "curl", "kmod-tun"}
 
 
 def test_corrupt_index_digest_blocks_resolution():

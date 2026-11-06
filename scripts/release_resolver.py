@@ -103,11 +103,21 @@ def resolve_release(
     except UnicodeDecodeError as exc:
         raise ReleaseValidationError(f"Invalid package checksum manifest: {package_sums_url}") from exc
 
+    kernel = profiles.get("linux_kernel", {})
+    kernel_parts = (kernel.get("version"), kernel.get("release"), kernel.get("vermagic"))
+    if not all(kernel_parts):
+        raise ReleaseValidationError("profiles.json lacks complete kernel index identity")
+    kmod_directory = "-".join(str(item) for item in kernel_parts)
     source_specs = [
         (
             f"{capabilities['base_url']}/packages/index.json",
             capabilities["sha256sums_url"],
             "packages/index.json",
+        ),
+        (
+            f"{capabilities['base_url']}/kmods/{kmod_directory}/index.json",
+            capabilities["sha256sums_url"],
+            f"kmods/{kmod_directory}/index.json",
         ),
         *(
             (f"{package_root}/{feed}/index.json", package_sums_url, f"{feed}/index.json")
