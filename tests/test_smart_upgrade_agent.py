@@ -611,7 +611,68 @@ def test_dmi_vendor_is_not_legacy_bios_evidence(tmp_path):
     (fixture / "uname.txt").write_text("x86_64\n")
     report = scan(tmp_path, fixture_dir=fixture)
     assert report["system"]["boot_mode"] == "unknown"
+    assert report["system"]["boot_evidence"] == "no_affirmative_evidence"
 
     (fixture / "boot-mode.txt").write_text("bios\n")
     explicitly_proven = scan(tmp_path, fixture_dir=fixture)
     assert explicitly_proven["system"]["boot_mode"] == "bios"
+    assert explicitly_proven["system"]["boot_evidence"] == "fixture_override"
+
+
+def test_linux_efi_sysfs_is_affirmative_read_only_evidence(tmp_path):
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc/openwrt_release").write_text(
+        "DISTRIB_ID='ImmortalWrt'\nDISTRIB_TARGET='x86/64'\nDISTRIB_ARCH='x86_64'\n"
+    )
+    systab = tmp_path / "sys/firmware/efi/systab"
+    systab.parent.mkdir(parents=True)
+    systab.write_text("SMBIOS3=0x1\n")
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "uname.txt").write_text("x86_64\n")
+    report = scan(tmp_path, fixture_dir=fixture)
+    assert report["system"]["boot_mode"] == "efi"
+    assert report["system"]["boot_evidence"] == "linux_efi_sysfs"
+
+
+def test_efi_capable_kernel_without_efi_sysfs_does_not_prove_legacy_bios(tmp_path):
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc/openwrt_release").write_text(
+        "DISTRIB_ID='ImmortalWrt'\nDISTRIB_TARGET='x86/64'\nDISTRIB_ARCH='x86_64'\n"
+    )
+    config = tmp_path / "boot/config-test"
+    config.parent.mkdir(parents=True)
+    config.write_text("CONFIG_EFI=y\nCONFIG_EFI_STUB=y\n")
+    mountinfo = tmp_path / "proc/self/mountinfo"
+    mountinfo.parent.mkdir(parents=True)
+    mountinfo.write_text(
+        "25 1 0:1 / / rw - overlay overlay rw\n"
+        "26 1 0:2 / /sys rw - sysfs sysfs rw\n"
+    )
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "uname.txt").write_text("x86_64\n")
+    report = scan(tmp_path, fixture_dir=fixture)
+    assert report["system"]["boot_mode"] == "unknown"
+    assert report["system"]["boot_evidence"] == "no_affirmative_evidence"
+    compatibility = subprocess.run(
+        [
+            "python",
+            str(ROOT / "scripts/identity-compat.py"),
+            "--snapshot",
+            "/dev/stdin",
+            "--target",
+            "x86/64",
+            "--profile",
+            "generic",
+            "--architecture",
+            "x86_64",
+            "--image-type",
+            "combined-efi",
+        ],
+        input=json.dumps(report),
+        capture_output=True,
+        text=True,
+    )
+    assert compatibility.returncode == 1
+    assert json.loads(compatibility.stdout)["status"] == "unknown"

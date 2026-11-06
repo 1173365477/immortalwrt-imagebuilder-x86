@@ -16,12 +16,12 @@
     "errors": {"type": "array", "items": {"type": "string", "maxLength": 1000}, "maxItems": 256},
     "system": {
       "type": "object", "additionalProperties": false,
-      "required": ["distribution", "version", "target", "profile", "architecture", "package_architecture", "kernel_architecture", "boot_mode", "rootfs_type", "firmware_image_type", "package_manager", "identity_status", "identity_errors"],
+      "required": ["distribution", "version", "target", "profile", "architecture", "package_architecture", "kernel_architecture", "boot_mode", "boot_evidence", "rootfs_type", "firmware_image_type", "package_manager", "identity_status", "identity_errors"],
       "properties": {
         "distribution": {"type": "string", "maxLength": 128}, "version": {"type": ["string", "null"], "maxLength": 128},
         "target": {"type": ["string", "null"], "maxLength": 128}, "profile": {"type": ["string", "null"], "maxLength": 128},
         "architecture": {"type": ["string", "null"], "maxLength": 128}, "package_architecture": {"type": ["string", "null"], "maxLength": 128},
-        "kernel_architecture": {"type": ["string", "null"], "maxLength": 128}, "boot_mode": {"enum": ["efi", "bios", "unknown"]},
+        "kernel_architecture": {"type": ["string", "null"], "maxLength": 128}, "boot_mode": {"enum": ["efi", "bios", "unknown"]}, "boot_evidence": {"enum": ["linux_efi_sysfs", "fixture_override", "no_affirmative_evidence"]},
         "rootfs_type": {"type": "string", "maxLength": 64}, "firmware_image_type": {"type": "string", "maxLength": 128},
         "package_manager": {"enum": ["opkg", "apk", "unknown"]}, "identity_status": {"enum": ["consistent", "conflict", "unknown"]},
         "identity_errors": {"type": "array", "items": {"type": "string", "maxLength": 256}, "maxItems": 32}

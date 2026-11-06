@@ -23,7 +23,7 @@ if [ -n "$FIXTURE_DIR" ] && [ ! -d "$FIXTURE_DIR" ]; then
 fi
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 export ROOT PRIVACY FIXTURE_DIR
-UBUS_BOARD=""; UNAME_M=""; PACKAGE_ARCH=""; BOOT_OVERRIDE=""
+UBUS_BOARD=""; UNAME_M=""; PACKAGE_ARCH=""; BOOT_OVERRIDE=""; BOOT_EVIDENCE="no_affirmative_evidence"
 if [ -n "$FIXTURE_DIR" ]; then
   [ ! -r "$FIXTURE_DIR/ubus-system-board.json" ] || UBUS_BOARD=$(sed -n '1,80p' "$FIXTURE_DIR/ubus-system-board.json")
   [ ! -r "$FIXTURE_DIR/uname.txt" ] || IFS= read -r UNAME_M < "$FIXTURE_DIR/uname.txt" || true
@@ -35,6 +35,11 @@ elif [ "$ROOT" = / ]; then
   if command -v apk >/dev/null 2>&1; then PACKAGE_ARCH=$(apk --print-arch 2>/dev/null || true)
   elif command -v opkg >/dev/null 2>&1; then PACKAGE_ARCH=$(opkg print-architecture 2>/dev/null | awk 'END{print $2}' || true)
   fi
+fi
+if [ -n "$BOOT_OVERRIDE" ]; then
+  BOOT_EVIDENCE="fixture_override"
+elif [ -d "$ROOT/sys/firmware/efi" ] && [ -r "$ROOT/sys/firmware/efi/systab" ]; then
+  BOOT_EVIDENCE="linux_efi_sysfs"
 fi
 STORAGE_JSON=$(sh "$SCRIPT_DIR/smart-upgrade-storage.sh") || {
   echo "storage analysis failed" >&2
@@ -80,7 +85,7 @@ SOURCE_DIGEST=$(
 # The storage helper may query Docker through fixed, read-only templates as root.
 awk -v root="$ROOT" -v privacy="$PRIVACY" -v storage_json="$STORAGE_JSON" -v service_rows="$SERVICE_ROWS" \
   -v source_digest="$SOURCE_DIGEST" -v ubus_board="$UBUS_BOARD" -v uname_m="$UNAME_M" \
-  -v package_arch="$PACKAGE_ARCH" -v boot_override="$BOOT_OVERRIDE" '
+  -v package_arch="$PACKAGE_ARCH" -v boot_override="$BOOT_OVERRIDE" -v boot_evidence="$BOOT_EVIDENCE" '
 function esc(s,   x) {
   gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s)
   gsub(/\r/, "", s); gsub(/\t/, " ", s); gsub(/\n/, " ", s)
@@ -120,7 +125,7 @@ function identity(  fn,line,a,dash) {
  close(fn)
  boot="unknown"
  if(boot_override~/^(efi|bios|unknown)$/)boot=boot_override
- else if(exists(root "/sys/firmware/efi/systab"))boot="efi"
+ else if(boot_evidence=="linux_efi_sysfs")boot="efi"
  if(image_type=="")image_type="unknown"
  identity_ok=1;identity_errors=""
  if(target~/^x86\/64$/ && uname_m!="" && uname_m!="x86_64"){identity_ok=0;identity_errors="target_uname_arch_mismatch"}
@@ -263,7 +268,7 @@ BEGIN {
  if(exists(root "/usr/lib/opkg/status"))manager="opkg"
  else if(exists(root "/lib/apk/db/installed"))manager="apk"
  printf "{\"schema_version\":\"1.0.0\",\"snapshot_id\":%s,\"digest\":{\"algorithm\":\"sha256\",\"canonicalization\":\"evidence-sha256-v2\",\"value\":%s},\"status\":\"partial\",\"privacy_mode\":%s,",q("urn:sha256:" source_digest),q(source_digest),q(privacy)
- printf "\"system\":{\"distribution\":%s,\"version\":%s,\"target\":%s,\"profile\":%s,\"architecture\":%s,\"package_architecture\":%s,\"kernel_architecture\":%s,\"boot_mode\":%s,\"rootfs_type\":%s,\"firmware_image_type\":%s,\"package_manager\":%s,\"identity_status\":%s,\"identity_errors\":[",q(distro),version==""?"null":q(version),target==""?"null":q(target),profile==""?"null":q(profile),arch==""?"null":q(arch),package_arch==""?"null":q(package_arch),uname_m==""?"null":q(uname_m),q(boot),q(rootfs),q(image_type),q(manager),q(identity_ok?"consistent":"conflict")
+ printf "\"system\":{\"distribution\":%s,\"version\":%s,\"target\":%s,\"profile\":%s,\"architecture\":%s,\"package_architecture\":%s,\"kernel_architecture\":%s,\"boot_mode\":%s,\"boot_evidence\":%s,\"rootfs_type\":%s,\"firmware_image_type\":%s,\"package_manager\":%s,\"identity_status\":%s,\"identity_errors\":[",q(distro),version==""?"null":q(version),target==""?"null":q(target),profile==""?"null":q(profile),arch==""?"null":q(arch),package_arch==""?"null":q(package_arch),uname_m==""?"null":q(uname_m),q(boot),q(boot_evidence),q(rootfs),q(image_type),q(manager),q(identity_ok?"consistent":"conflict")
  ne=split(identity_errors,ie,",");for(i=1;i<=ne;i++)if(ie[i]!=""){if(i>1)printf ",";printf "%s",q(ie[i])}printf "]},"
  printf "\"packages\":{\"installed\":["
  if(manager=="opkg")opkg()

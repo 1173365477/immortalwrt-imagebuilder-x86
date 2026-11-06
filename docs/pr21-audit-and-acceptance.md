@@ -71,6 +71,24 @@ The follow-up started from remote HEAD `b3ed1aec30b0cad8edfcc6ae9b4a1798434238c6
 
 Targeted implementation CI: [Project self-test #53](https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/42024934027) — all steps passed.
 
+## Legacy BIOS evidence decision
+
+Linux provides affirmative EFI evidence through `/sys/firmware/efi`: the upstream
+EFI subsystem creates that sysfs interface after EFI boot information is accepted,
+and its `systab` ABI exposes EFI configuration tables.  Upstream does not provide
+the inverse guarantee that an absent directory proves a Legacy BIOS boot.  Kernel
+configuration, EFI disabling, registration failure, and namespace/sysfs visibility
+can all make absence inconclusive.  See the Linux kernel
+[`drivers/firmware/efi/efi.c`](https://github.com/torvalds/linux/blob/master/drivers/firmware/efi/efi.c)
+and [`sysfs-firmware-efi` ABI](https://www.kernel.org/doc/html/latest/admin-guide/abi-testing-files.html#abi-file-testing-sysfs-firmware-efi).
+
+The scanner therefore records `linux_efi_sysfs` as affirmative EFI evidence but
+keeps Legacy BIOS as `unknown` unless an audited adapter is added in a future
+change. DMI vendor strings, x86_64, GPT/MBR, `CONFIG_EFI=y`, and EFI-sysfs absence
+are not promoted to BIOS evidence. Unknown boot mode continues to block automatic
+EFI or legacy image selection. T05 remains **PARTIAL** for detection completeness,
+without creating a false-compatible or false-safe state.
+
 ## First-boot third-party installer audit
 
 `files/etc/uci-defaults/99-install-thirdparty` is **not** part of the local read-only scanner. It executes later, as root, on first boot of a generated image and runs `apk add --allow-untrusted` for every bundled `/root/thirdparty/*.apk`.
