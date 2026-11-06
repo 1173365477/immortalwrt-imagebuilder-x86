@@ -32,3 +32,15 @@ def test_ci_runs_actionlint_and_all_scanner_shellcheck_targets():
     assert "actionlint" in text
     assert "scripts/smart-upgrade-agent.sh scripts/smart-upgrade-storage.sh" in text
 
+
+def test_artifact_uploads_require_successful_safety_gate():
+    for name in ("analyze.yml", "build.yml"):
+        data = workflow(name)
+        job = next(iter(data["jobs"].values()))
+        safety = next(step for step in job["steps"] if step.get("id") == "artifact_safety")
+        assert safety["if"] == "always()"
+        assert "validate-artifacts.py --path generated" in safety["run"]
+        uploads = [step for step in job["steps"] if step.get("uses") == "actions/upload-artifact@v4"]
+        assert uploads
+        assert all("steps.artifact_safety.outcome == 'success'" in step["if"] for step in uploads)
+

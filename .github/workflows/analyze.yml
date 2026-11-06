@@ -83,14 +83,18 @@ jobs:
         if: always()
         run: |
           for file in generated/packages-official.txt generated/packages-thirdparty.txt generated/packages-missing.txt generated/packages-skipped.txt generated/packages-replaced.txt; do
-            echo "===== $file ====="
             if [[ -f "$file" ]]; then
-              cat "$file"
+              echo "$file: $(wc -l < "$file") row(s)"
             fi
           done
 
-      - name: Upload migration analysis
+      - name: Validate Artifact safety
+        id: artifact_safety
         if: always()
+        run: python scripts/validate-artifacts.py --path generated
+
+      - name: Upload migration analysis
+        if: ${{ always() && steps.artifact_safety.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: migration-analysis

@@ -151,8 +151,13 @@ jobs:
           STRICT_MODE: ${{ inputs.strict_mode }}
         run: scripts/build-image.sh
 
-      - name: Upload firmware and migration evidence
+      - name: Validate Artifact safety
+        id: artifact_safety
         if: always()
+        run: python scripts/validate-artifacts.py --path generated
+
+      - name: Upload firmware and migration evidence
+        if: ${{ always() && steps.artifact_safety.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: immortalwrt-${{ steps.release.outputs.version || 'unresolved' }}-x86-64-generic-${{ github.run_number }}${{ steps.thirdparty.outputs.suffix }}

@@ -12,6 +12,22 @@ from typing import Any
 
 PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+_.@-]*$")
 VERSION_RE = re.compile(r"^(?:v?\d|r\d|[0-9a-f]{7,})(?:[A-Za-z0-9+_.:~^-]*-?)*$")
+REPORT_VERSION_RE = re.compile(
+    r"^(?P<version>\d{1,3}\.\d{1,3}(?:\.\d{1,3})?)"
+    r"(?:\s+r\d+-[A-Za-z0-9]{7,40})?"
+    r"(?:\s+\(kernel\s+\d{1,3}\.\d{1,3}(?:\.\d{1,3})?[A-Za-z0-9+_.~-]*\))?$"
+)
+METADATA_VALUE_RE = {
+    "target": re.compile(r"^[a-z0-9][a-z0-9+_.-]{0,63}/[a-z0-9][a-z0-9+_.-]{0,63}$"),
+    "profile": re.compile(r"^[A-Za-z0-9][A-Za-z0-9+_.-]{0,127}$"),
+    "package_arch": re.compile(r"^[A-Za-z0-9][A-Za-z0-9+_.-]{0,63}$"),
+    "rootfs_type": re.compile(r"^[a-z0-9][a-z0-9+_.-]{0,31}$"),
+    "sys_type": re.compile(r"^[a-z0-9][a-z0-9+_.-]{0,63}$"),
+}
+PROFILE_LINE_RE = re.compile(
+    r"^(?P<profile>[A-Za-z0-9][A-Za-z0-9+_.-]{0,127})"
+    r"(?:\s+\([a-z0-9][a-z0-9+_.-]{0,63}/[a-z0-9][a-z0-9+_.-]{0,63}\))?$"
+)
 META_KEYS = {
     "version-from": "source_version",
     "version-to": "target_version",
@@ -30,7 +46,8 @@ SECTION_NAMES = {
     "user installed packages": "user_installed_packages",
 }
 SENSITIVE_RE = re.compile(
-    r"(?i)(-----BEGIN [A-Z ]*PRIVATE KEY-----|(?:token|password|passwd|secret|subscription)\s*[:=]|https?://[^\s]+@)"
+    r"(?i)(TEST_SECRET_DO_NOT_UPLOAD_[A-Z0-9_]*|-----BEGIN [A-Z ]*PRIVATE KEY-----|"
+    r"(?:token|password|passwd|secret|subscription)\s*[:=]|https?://[^\s]+@)"
 )
 MAX_REPORT_BYTES = 8 * 1024 * 1024
 MAX_PACKAGE_EXPORT_BYTES = 16 * 1024 * 1024
@@ -46,9 +63,20 @@ def read_bounded_utf8(path: Path, limit: int) -> str:
         raise ValueError(f"input is not valid UTF-8: {path}: {exc}") from exc
 
 
-def clean_version(value: str) -> str:
-    match = re.search(r"\b(\d+\.\d+(?:\.\d+)?(?:[-+~][^\s]+)?)\b", value)
-    return match.group(1) if match else value.strip()
+def validate_metadata(field: str, value: str) -> str | None:
+    """Return a normalized allow-listed value without copying rejected input."""
+    if not value or len(value) > 256 or re.search(r"[\x00-\x1f\x7f]", value):
+        return None
+    if SENSITIVE_RE.search(value):
+        return None
+    if field in {"source_version", "target_version"}:
+        match = REPORT_VERSION_RE.fullmatch(value)
+        return match.group("version") if match else None
+    if field == "profile":
+        match = PROFILE_LINE_RE.fullmatch(value)
+        return match.group("profile") if match else None
+    validator = METADATA_VALUE_RE.get(field)
+    return value if validator and validator.fullmatch(value) else None
 
 
 def redact(value: str) -> str:
@@ -218,7 +246,13 @@ def parse_report(report_path: Path, installed_path: Path | None, top_level_path:
             if normalized in META_KEYS:
                 field = META_KEYS[normalized]
                 value = meta.group(2).strip()
-                analysis[field] = clean_version(value) if field.endswith("version") else value.split()[0]
+                safe_value = validate_metadata(field, value)
+                if safe_value is None:
+                    error_code = f"metadata_invalid:{field}"
+                    if error_code not in analysis["errors"]:
+                        analysis["errors"].append(error_code)
+                else:
+                    analysis[field] = safe_value
 
         header = re.match(r"^\s*([A-Za-z -]+packages)\s*(?:\((?:example )?subset\))?\s*:\s*(.*)$", line, re.IGNORECASE)
         if header:
