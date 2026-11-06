@@ -18,6 +18,7 @@ def main() -> int:
     parser.add_argument("--version", default="latest")
     parser.add_argument("--target", default="x86/64")
     parser.add_argument("--profile", default="generic")
+    parser.add_argument("--architecture", default="x86_64")
     parser.add_argument("--filesystem", default="ext4")
     parser.add_argument("--image-type", default="combined-efi")
     parser.add_argument("--output-dir", type=Path, default=Path("generated"))
@@ -27,6 +28,7 @@ def main() -> int:
         capabilities, packages = resolve_release(ReleaseRequest(
             distribution=args.distribution, version=version, target=args.target,
             profile=args.profile, filesystem=args.filesystem, image_type=args.image_type,
+            architecture=args.architecture,
         ))
     except (ReleaseValidationError, OSError) as exc:
         print(f"::error::{exc}")

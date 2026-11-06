@@ -68,7 +68,7 @@ def test_corrupt_index_digest_blocks_resolution():
 
 
 def test_wrong_architecture_cannot_reuse_x86_indexes():
-    with pytest.raises(ReleaseValidationError, match="unexpected fixture URL"):
+    with pytest.raises(ReleaseValidationError, match="package architecture"):
         resolve_release(
             ReleaseRequest(version="29.0.1"), fetch=fixture_fetch(arch="aarch64_cortex-a53")
         )

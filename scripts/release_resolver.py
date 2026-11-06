@@ -28,6 +28,7 @@ class ReleaseRequest:
     profile: str = "generic"
     filesystem: str = "ext4"
     image_type: str = "combined-efi"
+    architecture: str | None = "x86_64"
 
 
 def _json_object(data: bytes, source: str) -> dict[str, Any]:
@@ -87,6 +88,11 @@ def resolve_release(
         image_type=request.image_type,
         fetch=fetch,
     )
+    if request.architecture and capabilities.get("arch") != request.architecture:
+        raise ReleaseValidationError(
+            f"Official target package architecture is {capabilities.get('arch')!r}; "
+            f"expected {request.architecture!r}."
+        )
     arch = capabilities["arch"]
     root = official_download_root(request.distribution)
     package_root = f"{root}/releases/{request.version}/packages/{arch}"
