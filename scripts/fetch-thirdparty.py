@@ -14,12 +14,17 @@ import tarfile
 import tempfile
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
 
 from release_utils import ReleaseValidationError, parse_version, sha256_file
+
+
+MAX_ARCHIVE_MEMBERS = 64
+MAX_ARCHIVE_UNPACKED_BYTES = 512 * 1024 * 1024
 
 
 class ProviderError(RuntimeError):
@@ -115,7 +120,10 @@ def copy_archive_members(archive: Path, patterns: list[re.Pattern[str]], destina
     copied: list[Path] = []
     matched = [False] * len(patterns)
     with tarfile.open(archive, "r:gz") as tar:
-        for member in tar.getmembers():
+        members = tar.getmembers()
+        if len(members) > MAX_ARCHIVE_MEMBERS or sum(max(0, member.size) for member in members) > MAX_ARCHIVE_UNPACKED_BYTES:
+            raise ProviderError("incompatible", "third-party archive exceeds extraction safety limits")
+        for member in members:
             if not member.isfile():
                 continue
             pure = PurePosixPath(member.name)
@@ -128,6 +136,8 @@ def copy_archive_members(archive: Path, patterns: list[re.Pattern[str]], destina
                     if source is None:
                         raise ProviderError("incompatible", f"cannot read archive member: {member.name}")
                     target = destination / basename
+                    if target.exists():
+                        raise ProviderError("incompatible", f"duplicate archive member filename: {basename}")
                     with source, target.open("wb") as output:
                         shutil.copyfileobj(source, output)
                     copied.append(target)
@@ -168,6 +178,44 @@ def release_metadata(provider: str, cfg: dict[str, Any], values: dict[str, str])
             raise ProviderError("unresolved", f"{provider}: release asset pagination exceeded 100 pages")
         release["assets"] = assets
     return release
+
+
+def validate_provider_config(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if config.get("schema_version") != "1.0.0":
+        raise ProviderError("unresolved", "third-party rules require schema_version 1.0.0")
+    policy = config.get("policy")
+    if not isinstance(policy, dict) or policy.get("unknown_provider") != "unresolved":
+        raise ProviderError("unresolved", "third-party rules must fail closed for unknown providers")
+    if policy.get("execute_upstream_scripts") is not False:
+        raise ProviderError("unresolved", "executing upstream installation scripts is forbidden")
+    providers = config.get("providers")
+    if not isinstance(providers, dict):
+        raise ProviderError("unresolved", "third-party providers mapping is missing")
+    required = {
+        "rule_version", "source_type", "upstream", "repository", "install_path",
+        "package_format", "supported_package_managers", "supported_architectures",
+        "require_digest", "compatibility_evidence", "confidence",
+    }
+    for name, cfg in providers.items():
+        missing = sorted(required - set(cfg))
+        if missing:
+            raise ProviderError("unresolved", f"{name}: incomplete provider rule: {', '.join(missing)}")
+        expected_upstream = f"https://github.com/{cfg['repository']}"
+        if cfg["source_type"] != "github_release" or cfg["upstream"] != expected_upstream:
+            raise ProviderError("unresolved", f"{name}: upstream does not match the pinned GitHub repository")
+        if cfg["install_path"] != "imagebuilder-binary" or cfg["package_format"] != "apk":
+            raise ProviderError("unresolved", f"{name}: SDK and ImageBuilder paths must remain distinct")
+        if not cfg["require_digest"] or not cfg["compatibility_evidence"]:
+            raise ProviderError("unresolved", f"{name}: verifiable digest/evidence is required")
+    return providers
+
+
+def validate_asset_url(provider: str, cfg: dict[str, Any], asset: dict[str, Any]) -> None:
+    raw = str(asset.get("browser_download_url") or "")
+    parsed = urlparse(raw)
+    prefix = f"/{cfg['repository']}/releases/download/"
+    if parsed.scheme != "https" or parsed.netloc != "github.com" or not parsed.path.startswith(prefix):
+        raise ProviderError("unresolved", f"{provider}: asset URL is outside its trusted upstream")
 
 
 def match_assets(
@@ -295,11 +343,19 @@ def main() -> int:
         )
         return 2
 
-    config = yaml.safe_load(args.config.read_text(encoding="utf-8"))["providers"]
+    raw_config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
+    try:
+        config = validate_provider_config(raw_config)
+    except ProviderError as exc:
+        print(f"::error::{exc.reason}")
+        return 2
     selected = selected_providers(args.selection)
     args.destination.mkdir(parents=True, exist_ok=True)
     for stale in args.destination.glob("*.apk"):
         stale.unlink()
+    stale_manifest = args.destination / "SHA256SUMS"
+    if stale_manifest.exists():
+        stale_manifest.unlink()
     records: list[dict[str, Any]] = []
     statuses: dict[str, dict[str, Any]] = {}
     values = template_values(args.version, capabilities, args.openclash_version)
@@ -318,6 +374,10 @@ def main() -> int:
                     raise ProviderError(
                         "incompatible",
                         f"provider supports {supported_managers}, target uses {capabilities['package_manager']}",
+                    )
+                if capabilities.get("distribution") not in cfg.get("supported_distributions", ["immortalwrt"]):
+                    raise ProviderError(
+                        "incompatible", f"provider does not support distribution {capabilities.get('distribution')}"
                     )
                 supported_arches = cfg.get("supported_architectures", [])
                 if capabilities["arch"] not in supported_arches and "all" not in supported_arches:
@@ -338,6 +398,7 @@ def main() -> int:
                 provider_records: list[dict[str, Any]] = []
                 output_apks: list[Path] = []
                 for asset in assets:
+                    validate_asset_url(provider, cfg, asset)
                     target = provider_dir / asset["name"]
                     actual = download(asset["browser_download_url"], target)
                     verify_digest(asset, actual, bool(cfg.get("require_digest")))
@@ -378,7 +439,10 @@ def main() -> int:
                         metadata_rows.append({"file": path.name, **metadata})
                     if warning and warning not in warnings:
                         warnings.append(warning)
-                    shutil.copy2(path, args.destination / path.name)
+                    destination = args.destination / path.name
+                    if destination.exists():
+                        raise ProviderError("unresolved", f"duplicate third-party APK filename: {path.name}")
+                    shutil.copy2(path, destination)
                 records.extend(provider_records)
                 statuses[provider] = {
                     "status": "compatible",
@@ -396,6 +460,10 @@ def main() -> int:
     (args.metadata.parent / "thirdparty-sha256sums").write_text(
         "\n".join(sums) + ("\n" if sums else ""), encoding="utf-8"
     )
+    if sums:
+        manifest = args.destination / "SHA256SUMS"
+        manifest.write_text("\n".join(sums) + "\n", encoding="utf-8")
+        manifest.chmod(0o600)
     args.metadata.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     args.status.write_text(json.dumps(statuses, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     report = render_compatibility_report(capabilities, statuses)
