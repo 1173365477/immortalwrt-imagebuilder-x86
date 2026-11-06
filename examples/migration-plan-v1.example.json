@@ -1,0 +1,133 @@
+{
+  "schema_version": "1.0.0",
+  "plan_id": "urn:sha256:979a087e7a43b22e44d6de10f54c138beaece4dde4ebc6afc006095cc12bbc8d",
+  "digest": "979a087e7a43b22e44d6de10f54c138beaece4dde4ebc6afc006095cc12bbc8d",
+  "source_snapshot_id": "urn:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "source_snapshot_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "status": "ok",
+  "privacy_mode": "redacted",
+  "source": {
+    "distribution": "ImmortalWrt",
+    "version": "25.12.2",
+    "target": "x86/64",
+    "profile": "generic",
+    "architecture": "x86_64",
+    "package_manager": "apk",
+    "boot_mode": "efi"
+  },
+  "target": {
+    "distribution": "immortalwrt",
+    "version": "25.12.2",
+    "target": "x86/64",
+    "profile": "generic",
+    "architecture": "x86_64",
+    "package_manager": "apk",
+    "boot_mode": "efi",
+    "image_type": "combined-efi",
+    "image_name": "immortalwrt-25.12.2-x86-64-generic-ext4-combined-efi.img.gz",
+    "image_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "compatibility": "compatible"
+  },
+  "release": {
+    "channel": "release",
+    "resolution_digest": "521b862707ddf2ab50d20b6722381a76b0ff3d4d3f665b415b88253052c38041",
+    "profiles_url": "https://downloads.immortalwrt.org/releases/25.12.2/targets/x86/64/profiles.json",
+    "profiles_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "official_index_digest": "c94f7aa79fa0685a62b42e1107934215e4b5cf693e025099ef907998672a1f5d",
+    "package_index_sources": [
+      {
+        "url": "https://downloads.immortalwrt.org/releases/25.12.2/targets/x86/64/packages/index.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "checksum_manifest_url": "https://downloads.immortalwrt.org/releases/25.12.2/targets/x86/64/sha256sums",
+        "checksum_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "checksum_entry": "packages/index.json"
+      }
+    ],
+    "imagebuilder_url": "https://downloads.immortalwrt.org/releases/25.12.2/targets/x86/64/immortalwrt-imagebuilder-25.12.2-x86-64.Linux-x86_64.tar.zst",
+    "imagebuilder_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "package_summary": {
+    "installed": 3,
+    "keep": 1,
+    "replace": 0,
+    "skip": 2,
+    "review": 0,
+    "block": 0
+  },
+  "storage_risk": {
+    "status": "ok",
+    "docker_present": false,
+    "firmware_overwrite_risks": [],
+    "flash_blockers": [
+      "MVP v1 never authorizes flashing"
+    ]
+  },
+  "explicit_exclusions": [],
+  "strict_mode": true,
+  "build_allowed": true,
+  "build_status": "not_started",
+  "compatibility_validated": false,
+  "flash_ready": false,
+  "decisions": [
+    {
+      "package": "busybox",
+      "source_version": "1.36.1",
+      "origin": "official",
+      "install_reason": "system_default",
+      "target_package": null,
+      "provider": null,
+      "dependencies": [],
+      "replacements": [],
+      "conflicts": [],
+      "evidence": [
+        "firmware-rom-baseline"
+      ],
+      "decision": "skip",
+      "match_type": "dependency_recalculation",
+      "compatible": true,
+      "reason": "target resolver will recalculate defaults and automatic dependencies"
+    },
+    {
+      "package": "ca-bundle",
+      "source_version": "20251003",
+      "origin": "official",
+      "install_reason": "dependency",
+      "target_package": null,
+      "provider": null,
+      "dependencies": [],
+      "replacements": [],
+      "conflicts": [],
+      "evidence": [
+        "apk-installed-db"
+      ],
+      "decision": "skip",
+      "match_type": "dependency_recalculation",
+      "compatible": true,
+      "reason": "target resolver will recalculate defaults and automatic dependencies"
+    },
+    {
+      "package": "curl",
+      "source_version": "8.16.0",
+      "origin": "official",
+      "install_reason": "manual",
+      "target_package": "curl",
+      "provider": null,
+      "dependencies": [
+        "ca-bundle"
+      ],
+      "replacements": [],
+      "conflicts": [],
+      "evidence": [
+        "apk-world",
+        "operator-confirmed"
+      ],
+      "decision": "keep",
+      "match_type": "official",
+      "compatible": true,
+      "reason": "same package manager and frozen official index entry matched"
+    }
+  ],
+  "blockers": [],
+  "warnings": [],
+  "errors": []
+}

@@ -50,7 +50,7 @@
   ],
   "$defs": {
     "status": {"enum": ["ok", "partial", "blocked", "failed", "unknown"]},
-    "digest": {"type": "object", "additionalProperties": false, "required": ["algorithm", "canonicalization", "value"], "properties": {"algorithm": {"const": "sha256"}, "canonicalization": {"const": "evidence-sha256-v2"}, "value": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}},
+    "digest": {"type": "object", "additionalProperties": false, "required": ["algorithm", "canonicalization", "value"], "properties": {"algorithm": {"const": "sha256"}, "canonicalization": {"enum": ["evidence-sha256-v2", "legacy-analysis-adapter-v1"]}, "value": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}},
     "packageName": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+_.@-]*$", "maxLength": 256},
     "dependency": {"type": "object", "additionalProperties": false, "required": ["raw", "relation", "name", "operator", "version"], "properties": {"raw": {"type": "string", "maxLength": 1024}, "relation": {"enum": ["package", "soname", "virtual", "unknown"]}, "name": {"anyOf": [{"$ref": "#/$defs/packageName"}, {"type": "null"}]}, "operator": {"enum": [">=", "<=", "=", ">", "<", "~", null]}, "version": {"type": ["string", "null"], "maxLength": 512}, "parse_error": {"type": ["string", "null"], "maxLength": 256}}},
     "package": {"type": "object", "additionalProperties": false, "required": ["name", "version", "origin", "install_reason", "confidence", "evidence", "dependencies_raw", "depends", "provides_raw"], "properties": {

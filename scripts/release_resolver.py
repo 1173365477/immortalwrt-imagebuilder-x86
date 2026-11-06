@@ -133,6 +133,9 @@ def resolve_release(
             "feed_names": feed_names,
             "package_index_sources": sources,
             "official_package_count": len(packages),
+            "official_index_digest": hashlib.sha256(
+                json.dumps(packages, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
             "profiles_content_digest": hashlib.sha256(
                 json.dumps(profiles, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest(),

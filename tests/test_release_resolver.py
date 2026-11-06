@@ -19,9 +19,14 @@ def fixture_fetch(*, manager="apk", corrupt_index=False, arch="x86_64"):
     target_index = json.dumps({"packages": {"base-files": {"version": "1"}}}).encode()
     feed_index = json.dumps({"packages": {"curl": {"version": "9", "depends": ["libc"]}}}).encode()
     imagebuilder = "immortalwrt-imagebuilder-29.0.1-x86-64.Linux-x86_64.tar.zst"
+    image = next(
+        item for item in profiles["profiles"]["generic"]["images"]
+        if item["type"] == "combined-efi" and item["filesystem"] == "ext4"
+    )
     target_sums = (
         f"{hashlib.sha256(profiles_bytes).hexdigest()}  profiles.json\n"
         f"{'d' * 64}  {imagebuilder}\n"
+        f"{image['sha256']}  {image['name']}\n"
         f"{hashlib.sha256(target_index).hexdigest()}  packages/index.json\n"
     ).encode()
     feed_sums = (

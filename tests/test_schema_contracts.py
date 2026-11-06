@@ -29,10 +29,16 @@ VALID_SYSTEM = {
 }
 
 VALID_PLAN = {
-    "schema_version": "1.0.0", "plan_id": URN, "source_snapshot_id": URN, "source_snapshot_digest": HEX,
+    "schema_version": "1.0.0", "plan_id": URN, "digest": HEX, "source_snapshot_id": URN, "source_snapshot_digest": HEX,
     "status": "blocked", "privacy_mode": "redacted", "strict_mode": True, "build_allowed": False, "flash_ready": False,
-    "target": {"version": "25.12.2", "target": "x86/64", "profile": "generic", "architecture": "x86_64", "boot_mode": "unknown", "image_type": None, "compatibility": "unknown"},
-    "decisions": [{"package": "mystery", "decision": "review", "reason": "install intent unknown", "compatible": None, "evidence": ["apk-installed-db"]}],
+    "build_status": "not_started", "compatibility_validated": False,
+    "source": {"distribution": "ImmortalWrt", "version": "25.12.2", "target": "x86/64", "profile": "generic", "architecture": "x86_64", "package_manager": "apk", "boot_mode": "unknown"},
+    "target": {"distribution": "immortalwrt", "version": "25.12.2", "target": "x86/64", "profile": "generic", "architecture": "x86_64", "package_manager": "apk", "boot_mode": "unknown", "image_type": None, "image_name": None, "image_sha256": None, "compatibility": "unknown"},
+    "release": {"channel": "release", "resolution_digest": HEX, "profiles_url": "https://example.invalid/profiles.json", "profiles_sha256": HEX, "official_index_digest": HEX, "package_index_sources": [{"url": "https://example.invalid/index.json", "sha256": HEX, "checksum_manifest_url": "https://example.invalid/sha256sums", "checksum_manifest_sha256": HEX, "checksum_entry": "index.json"}], "imagebuilder_url": "https://example.invalid/imagebuilder.tar.zst", "imagebuilder_sha256": HEX},
+    "package_summary": {"installed": 1, "keep": 0, "replace": 0, "skip": 0, "review": 1, "block": 0},
+    "storage_risk": {"status": "partial", "docker_present": False, "firmware_overwrite_risks": [], "flash_blockers": ["MVP v1 never authorizes flashing"]},
+    "explicit_exclusions": [],
+    "decisions": [{"package": "mystery", "source_version": "1", "origin": "unknown", "install_reason": "unknown", "decision": "review", "target_package": None, "match_type": "unresolved", "provider": None, "reason": "install intent unknown", "compatible": None, "dependencies": [], "replacements": [], "conflicts": [], "evidence": ["apk-installed-db"]}],
     "blockers": ["target image compatibility unknown"], "warnings": [], "errors": []
 }
 

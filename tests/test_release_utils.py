@@ -83,11 +83,17 @@ def test_feed_names_are_discovered() -> None:
 
 def test_synthetic_future_release_capabilities() -> None:
     profiles = Path("tests/fixtures/profiles-29.0.json").read_bytes()
+    parsed_profiles = json.loads(profiles)
+    image = next(
+        item for item in parsed_profiles["profiles"]["generic"]["images"]
+        if item["type"] == "combined-efi" and item["filesystem"] == "ext4"
+    )
     archive = "immortalwrt-imagebuilder-29.0.1-x86-64.Linux-x86_64.tar.zst"
     import hashlib
     sums = (
         f"{hashlib.sha256(profiles).hexdigest()}  profiles.json\n"
         f"{'d' * 64}  {archive}\n"
+        f"{image['sha256']}  {image['name']}\n"
     ).encode()
 
     def fetch(url: str) -> bytes:

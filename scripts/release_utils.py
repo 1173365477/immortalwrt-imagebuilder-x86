@@ -258,6 +258,13 @@ def discover_release(
         filesystem=filesystem, image_type=image_type,
     )
     package_manager = detect_package_manager(profiles)
+    authenticated_image_digest = sum_entries.get(expected_image["name"])
+    if not authenticated_image_digest:
+        raise ReleaseValidationError(
+            f"Selected image is not authenticated by {sums_url}: {expected_image['name']}"
+        )
+    if expected_image.get("sha256") and expected_image["sha256"] != authenticated_image_digest:
+        raise ReleaseValidationError("profiles.json and sha256sums disagree on the selected image digest")
     archive, archive_sha256 = discover_imagebuilder(
         sums_text, version, distribution=distribution, target=target
     )
@@ -272,7 +279,7 @@ def discover_release(
         "filesystem": filesystem,
         "image_type": image_type,
         "expected_image_name": expected_image["name"],
-        "expected_image_sha256": expected_image.get("sha256"),
+        "expected_image_sha256": authenticated_image_digest,
         "package_manager": package_manager,
         "profiles_url": profiles_url,
         "profiles_sha256": actual_profiles_digest,
