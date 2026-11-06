@@ -28,17 +28,17 @@ The baseline HEAD had not changed when remediation began. The changes are increm
 |---|---|---|---|---|---|
 | T01 repository audit | `docs/sprint-0-audit.md`; this report | full suite and diff review | Baseline and safety boundaries recorded; issues mapped to fixes | Audit is scoped to PR and relevant pre-existing build path | PASS |
 | T02 target version parsing | `.github/workflows/build.yml` release step; `scripts/resolve_version.py` | `test_build_version_is_taken_from_dispatch_input_not_self_reference`; existing release tests | Dispatch input is consumed before the step output exists; downstream output name retained | Online release metadata remains time-dependent | PASS |
-| T03 three v1 Schemas | `schemas/*.json`; `docs/schema-v1-protocol.md` | positive/negative cases in `test_schema_contracts.py` | Required trace, status, privacy, blocker and MVP no-flash semantics enforced | Historical `system-analysis.json` intentionally remains a separate legacy artifact | PASS |
-| T04 CI baseline | `.github/workflows/ci.yml` | 70 pytest cases; actionlint; ShellCheck; workflow regressions | Local suite and GitHub-hosted online validation pass | Online release metadata remains external and time-dependent | PASS |
-| T05 identity and package manager | scanner; `identity-compat.py` | realistic OPKG/APK, non-installed, EFI/BIOS/unknown, architecture conflict tests | All uncertain values remain explicit; image selection is conservative | Hardware-specific ubus/sysfs variants beyond fixtures remain possible and must return unknown | PASS |
+| T03 three v1 Schemas | `schemas/*.json`; `docs/schema-v1-protocol.md` | positive/negative cases in `test_schema_contracts.py`, including incomplete Docker scans and invalid safety states | Required trace, status, privacy, blocker and MVP no-flash semantics enforced. Snapshot canonicalization v2 binds dynamic storage/device evidence | Historical `system-analysis.json` intentionally remains a separate legacy artifact | PASS |
+| T04 CI baseline | `.github/workflows/ci.yml` | 80 pytest cases; actionlint; ShellCheck; workflow regressions | Local suite and GitHub-hosted online validation pass | Online release metadata remains external and time-dependent | PASS |
+| T05 identity and package manager | scanner; `identity-compat.py` | realistic OPKG/APK, non-installed, EFI/BIOS/unknown, DMI negative regression and architecture conflict tests | All uncertain values remain explicit; DMI vendor presence is not treated as Legacy BIOS proof | Hardware-specific ubus/sysfs variants beyond fixtures remain possible and must return unknown | PASS |
 | T06 origin/install reason | scanner ROM baselines and optional read-only ROM origin manifest | official/third-party/unknown, manual/dependency/default/unknown tests | Origin is independent from intent; no feed origin is guessed | Existing devices without ROM origin evidence classify non-default origin as unknown | PASS |
 | T07 top-level fallback | parser/resolver and `package-decisions.json` | missing, empty, partial, complete and explicit-ignore conflict tests | Every installed package receives keep/replace/skip/block/review evidence; strict mode sees unresolved rows | A complete list still depends on truthful package-manager metadata | PASS |
-| T08 services and storage | scanner plus storage module | daemon mismatch, root/independent partition, volume, bind, nested mount, symlink, no Docker, permission, missing/truncated mountinfo, service state | Runtime/config distinction and local evidence chain implemented | Scanner observes its mount namespace; inaccessible daemon or sysfs is unknown. Docker socket must never be delegated to LuCI/RPC users | PASS |
-| T09 privacy/minimum privilege/errors | redacted default, bounded parser, fixed command templates, Schema privacy condition | secret non-leak, invalid UTF-8, oversize input, local/redacted path tests | No config secret, Docker environment or complete inspect object is read; local reports are not uploaded | Local mode contains paths by design and must stay local | PASS |
+| T08 services and storage | scanner plus storage module | daemon mismatch, same-disk/different-disk partitions, stopped-container bind, unused volume, 64-container truncation, query/inspect failures, nested mount, symlink, no Docker and missing mountinfo | Persistence and whole-disk overwrite exposure are independent. All containers and volumes are enumerated; incomplete scans are partial | Scanner observes its mount namespace; inaccessible daemon/sysfs or ambiguous firmware disk remains unknown. Docker socket must never be delegated to LuCI/RPC users | PASS |
+| T09 privacy/minimum privilege/errors | redacted default, bounded parser, fixed command templates, Schema privacy condition | secret non-leak, invalid UTF-8, oversize input, local/redacted path and stable-redaction snapshot-ID tests | No config secret, Docker environment or complete inspect object is read; anonymous disk/mount relationships survive redaction | Local mode contains paths by design and must stay local; root Docker inspection remains a privileged helper boundary | PASS |
 
 ## Verification
 
-- `pytest -q`: **70 passed**.
+- `pytest -q`: **80 passed**.
 - ShellCheck 0.10.0: passed for `smart-upgrade-agent.sh`, `smart-upgrade-storage.sh`, existing build script and first-boot script.
 - actionlint 1.7.7: passed for all workflows.
 - `git diff --check`: passed.
@@ -55,6 +55,21 @@ No firmware build was executed as part of this acceptance. The existing online i
 5. `2ca284f` — block-device resolution and capacity evidence.
 6. `5da3438` — acceptance report, evidence digest and ROM origin support.
 7. `1416641` — satisfy actionlint workflow shell checking without lowering rules.
+8. `7663717` — harden Docker enumeration, physical-disk risk, snapshot evidence and boot detection.
+9. `50796a2` — satisfy ShellCheck without suppressing the volume-fixture guard.
+
+## Targeted follow-up review at PR HEAD
+
+The follow-up started from remote HEAD `b3ed1aec30b0cad8edfcc6ae9b4a1798434238c6`; the earlier T01–T09 implementation was retained and reviewed only where the four reported gaps intersected it.
+
+| Area | Code evidence | Regression evidence | Known limit | Re-acceptance |
+|---|---|---|---|---|
+| T03 snapshot contract | `schemas/system-snapshot-v1.json:53,64-87`; `docs/schema-v1-protocol.md:7`; `scripts/smart-upgrade-agent.sh:55-78,265` | `tests/test_smart_upgrade_agent.py:386-402` (`test_snapshot_id_changes_with_dynamic_storage_and_identity_evidence`); `tests/test_schema_contracts.py:63-82` (`test_storage_contract_rejects_implicit_upgrade_safety_or_missing_completeness`) | v2 is evidence canonicalization, not RFC 8785 JSON canonicalization | PASS |
+| T05 boot identity | `scripts/smart-upgrade-agent.sh:93-128` | `tests/test_smart_upgrade_agent.py:405-421` (`test_dmi_vendor_is_not_legacy_bios_evidence`); existing `test_identity_uses_injected_read_only_evidence` | Legacy BIOS remains unknown unless an audited adapter supplies affirmative evidence | PASS |
+| T08 Docker/storage | `scripts/smart-upgrade-storage.sh:66-186,198-243,244-304` | `tests/test_smart_upgrade_agent.py:295-383` (`test_separate_partition_does_not_imply_firmware_overwrite_safety`, `test_all_container_states_and_unused_volumes_are_in_scan_scope`, incomplete-enumeration parameter cases and symlink regression) | A different physical disk is lower exposure to whole-firmware-disk overwrite, not a claim that upgrade/partition tooling is safe | PASS |
+| T09 conservative failure/privacy | `scripts/smart-upgrade-storage.sh:67-68,171-186,287-303`; `schemas/system-snapshot-v1.json:74-87` | `tests/test_smart_upgrade_agent.py:348-402`; `tests/test_schema_contracts.py:56-82` | Docker metadata queries require privileged local access and must not be exposed through generic LuCI/RPC | PASS |
+
+Targeted implementation CI: [Project self-test #53](https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/42024934027) — all steps passed.
 
 ## First-boot third-party installer audit
 
