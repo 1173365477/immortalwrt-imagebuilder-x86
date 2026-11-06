@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -70,6 +70,7 @@ def _thirdparty_compatibility(
     official_index: dict[str, Any],
     thirdparty_files: dict[str, str],
     source_dependencies: set[str],
+    trusted_evidence_digests: set[str],
 ) -> tuple[bool, str]:
     if status.get("status") != "compatible":
         return False, "provider status is not compatible"
@@ -78,10 +79,14 @@ def _thirdparty_compatibility(
     payload.pop("evidence_digest", None)
     if not SHA256_RE.fullmatch(str(evidence_digest or "")) or canonical_digest(payload) != evidence_digest:
         return False, "provider compatibility evidence digest is missing or inconsistent"
+    if evidence_digest not in trusted_evidence_digests:
+        return False, "provider evidence was not authenticated against the trusted upstream"
     if status.get("provider") != provider or status.get("rule_version") != provider_rule.get("rule_version"):
         return False, "provider identity or rule version does not match"
     if status.get("repository") != provider_rule.get("repository"):
         return False, "provider repository does not match the trusted rule"
+    if not isinstance(status.get("release_id"), int):
+        return False, "upstream release identity is missing"
     if package not in status.get("packages", []) or package not in provider_rule.get("packages", []):
         return False, "provider evidence does not cover this package"
 
@@ -127,6 +132,7 @@ def _thirdparty_compatibility(
         if (
             not isinstance(asset, dict)
             or asset.get("provider") != provider
+            or not isinstance(asset.get("asset_id"), int)
             or not asset.get("asset")
             or not SHA256_RE.fullmatch(str(asset.get("sha256") or ""))
             or parsed is None
@@ -141,6 +147,7 @@ def _thirdparty_compatibility(
         return False, "APK validation evidence is missing"
     target_arch = capabilities.get("arch")
     for check in apk_checks:
+        relative = PurePosixPath(str(check.get("file") or ""))
         if (
             not isinstance(check, dict)
             or not str(check.get("file") or "").endswith(".apk")
@@ -148,6 +155,10 @@ def _thirdparty_compatibility(
             or check.get("metadata_status") not in {"verified", "unavailable"}
             or not SHA256_RE.fullmatch(str(check.get("sha256") or ""))
             or check.get("architecture") not in {"all", "noarch", "unknown", target_arch}
+            or relative.is_absolute()
+            or len(relative.parts) != 2
+            or relative.parts[0] != provider
+            or ".." in relative.parts
         ):
             return False, "APK hash, format, or architecture evidence is invalid"
         if thirdparty_files.get(check["file"]) != check["sha256"]:
@@ -167,12 +178,14 @@ def generate_plan(
     *,
     package_rules: dict[str, Any] | None = None,
     thirdparty_files: dict[str, str] | None = None,
+    trusted_thirdparty_evidence: set[str] | None = None,
     strict_mode: bool = True,
 ) -> dict[str, Any]:
     thirdparty_status = thirdparty_status or {}
     exclusions = exclusions or []
     package_rules = package_rules or {}
     thirdparty_files = thirdparty_files or {}
+    trusted_thirdparty_evidence = trusted_thirdparty_evidence or set()
     blockers: list[str] = []
     warnings = list(snapshot.get("warnings", []))
     errors = list(snapshot.get("errors", []))
@@ -298,6 +311,7 @@ def generate_plan(
                     dependency["name"] for dependency in package.get("depends", [])
                     if dependency.get("relation") == "package" and dependency.get("name")
                 },
+                trusted_thirdparty_evidence,
             )
             if verified and not (package.get("install_reason") == "manual" and name not in top_level):
                 evidence.append(f"thirdparty-evidence:{status['evidence_digest']}")

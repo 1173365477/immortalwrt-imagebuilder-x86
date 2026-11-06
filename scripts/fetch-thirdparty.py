@@ -275,6 +275,64 @@ def inspect_apk_metadata(path: Path) -> tuple[dict[str, Any] | None, str | None]
     return metadata, None
 
 
+def validate_and_publish_apks(
+    provider: str,
+    output_apks: list[Path],
+    capabilities: dict[str, Any],
+    destination: Path,
+    *,
+    inspector=inspect_apk_metadata,
+) -> list[dict[str, Any]]:
+    """Validate a complete provider set, then publish its directory atomically."""
+    checks: list[dict[str, Any]] = []
+    for path in output_apks:
+        with path.open("rb") as package_file:
+            magic = package_file.read(3)
+        if path.stat().st_size < 4 or magic != b"ADB":
+            raise ProviderError("incompatible", f"downloaded file is not an APK v3 package: {path.name}")
+        metadata, warning = inspector(path)
+        if metadata is None:
+            raise ProviderError(
+                "unresolved", f"APK metadata could not be verified for {path.name}: {warning or 'unknown error'}"
+            )
+        missing_fields = [
+            field for field in ("name", "arch", "version", "dependencies")
+            if field not in metadata or metadata[field] is None or metadata[field] == ""
+        ]
+        if missing_fields:
+            raise ProviderError(
+                "unresolved", f"APK metadata lacks required field(s) for {path.name}: {', '.join(missing_fields)}"
+            )
+        if not isinstance(metadata["dependencies"], list):
+            raise ProviderError("unresolved", f"APK dependency metadata is invalid for {path.name}")
+        arch = metadata["arch"]
+        if arch not in {"all", "noarch", capabilities["arch"]}:
+            raise ProviderError(
+                "incompatible", f"APK {path.name} architecture {arch} conflicts with {capabilities['arch']}"
+            )
+        checks.append({
+            "file": f"{provider}/{path.name}",
+            "sha256": sha256_file(path),
+            "magic_verified": True,
+            "metadata_status": "verified",
+            "architecture": arch,
+            "package": metadata["name"],
+            "version": metadata["version"],
+            "dependencies": metadata["dependencies"],
+        })
+
+    final_provider = destination / provider
+    if final_provider.exists():
+        raise ProviderError("unresolved", f"provider output already exists: {provider}")
+    with tempfile.TemporaryDirectory(prefix=f".{provider}-", dir=destination.parent) as staging_name:
+        publish_dir = Path(staging_name) / provider
+        publish_dir.mkdir()
+        for path in output_apks:
+            shutil.copy2(path, publish_dir / path.name)
+        publish_dir.replace(final_provider)
+    return checks
+
+
 def render_compatibility_report(
     capabilities: dict[str, Any], statuses: dict[str, dict[str, Any]]
 ) -> str:
@@ -341,6 +399,7 @@ def compatible_status(
             "resolution_digest": capabilities.get("resolution_digest"),
             "official_index_digest": official_index_digest,
         },
+        "release_id": release.get("id"),
         "upstream_release": release.get("tag_name", ""),
         "assets": asset_records,
         "apk_checks": apk_checks,
@@ -353,6 +412,83 @@ def compatible_status(
     }
     status["evidence_digest"] = canonical_digest(status)
     return status
+
+
+def revalidate_status_provenance(
+    provider: str,
+    cfg: dict[str, Any],
+    status: dict[str, Any],
+    capabilities: dict[str, Any],
+    bundled_dir: Path,
+    values: dict[str, str],
+) -> str:
+    """Re-fetch trusted upstream evidence and compare it with bundled APK bytes."""
+    tag = str(status.get("upstream_release") or "")
+    if not re.fullmatch(r"[A-Za-z0-9._+~-]{1,128}", tag):
+        raise ProviderError("unresolved", f"{provider}: invalid pinned release tag")
+    pinned_cfg = dict(cfg)
+    pinned_cfg["release"] = "tag"
+    pinned_cfg["tag_template"] = tag
+    release = release_metadata(provider, pinned_cfg, values)
+    if release.get("id") != status.get("release_id") or release.get("tag_name") != tag:
+        raise ProviderError("unresolved", f"{provider}: release identity is not authenticated")
+    upstream_assets = {
+        (asset.get("id"), asset.get("name")): asset
+        for asset in release.get("assets", []) if isinstance(asset, dict)
+    }
+    produced: dict[str, str] = {}
+    with tempfile.TemporaryDirectory(prefix=f"verify-{provider}-") as temp_name:
+        temp = Path(temp_name)
+        records = status.get("assets", [])
+        if not isinstance(records, list) or not records:
+            raise ProviderError("unresolved", f"{provider}: asset evidence is missing")
+        for record in records:
+            if not isinstance(record, dict):
+                raise ProviderError("unresolved", f"{provider}: asset evidence is invalid")
+            asset = upstream_assets.get((record.get("asset_id"), record.get("asset")))
+            if not asset:
+                raise ProviderError("unresolved", f"{provider}: pinned asset is absent upstream")
+            expected_digest = f"sha256:{record.get('sha256')}"
+            if asset.get("digest") != expected_digest or asset.get("browser_download_url") != record.get("url"):
+                raise ProviderError("unresolved", f"{provider}: upstream asset digest or URL changed")
+            target = temp / asset["name"]
+            actual = download(asset["browser_download_url"], target)
+            if actual != record.get("sha256"):
+                raise ProviderError("unresolved", f"{provider}: re-downloaded asset digest mismatch")
+            if target.name.endswith(".tar.gz"):
+                patterns = [
+                    re.compile(format_template(pattern, values))
+                    for pattern in cfg.get("archive_member_patterns", [])
+                ]
+                outputs = copy_archive_members(target, patterns, temp)
+            elif target.name.endswith(".apk"):
+                outputs = [target]
+            else:
+                raise ProviderError("unresolved", f"{provider}: unsupported evidence asset")
+            for output in outputs:
+                produced[f"{provider}/{output.name}"] = sha256_file(output)
+
+    checks = status.get("apk_checks", [])
+    if not isinstance(checks, list) or not checks:
+        raise ProviderError("unresolved", f"{provider}: APK evidence is missing")
+    expected_apks: dict[str, str] = {}
+    for check in checks:
+        if not isinstance(check, dict):
+            raise ProviderError("unresolved", f"{provider}: APK evidence is invalid")
+        relative = PurePosixPath(str(check.get("file") or ""))
+        if relative.is_absolute() or len(relative.parts) != 2 or relative.parts[0] != provider or ".." in relative.parts:
+            raise ProviderError("unresolved", f"{provider}: unsafe APK evidence path")
+        expected_apks[relative.as_posix()] = str(check.get("sha256") or "")
+    if produced != expected_apks:
+        raise ProviderError("unresolved", f"{provider}: APK extraction evidence does not match upstream asset")
+    actual_bundled = {
+        relative: sha256_file(bundled_dir / relative)
+        for relative in expected_apks
+        if isinstance(relative, str) and (bundled_dir / relative).is_file()
+    }
+    if actual_bundled != expected_apks:
+        raise ProviderError("unresolved", f"{provider}: bundled APK bytes do not match upstream evidence")
+    return str(status.get("evidence_digest") or "")
 
 
 def unknown_provider_statuses(
@@ -433,6 +569,9 @@ def main() -> int:
     args.destination.mkdir(parents=True, exist_ok=True)
     for stale in args.destination.glob("*.apk"):
         stale.unlink()
+    for stale_provider in args.destination.iterdir():
+        if stale_provider.is_dir():
+            shutil.rmtree(stale_provider)
     stale_manifest = args.destination / "SHA256SUMS"
     if stale_manifest.exists():
         stale_manifest.unlink()
@@ -497,6 +636,7 @@ def main() -> int:
                     provider_records.append({
                         "provider": provider,
                         "release": release.get("tag_name", ""),
+                        "asset_id": asset.get("id"),
                         "asset": asset["name"],
                         "sha256": actual,
                         "url": asset["browser_download_url"],
@@ -514,38 +654,10 @@ def main() -> int:
                 if not output_apks:
                     raise ProviderError("unresolved", f"{provider}: no APK was produced")
 
-                apk_checks: list[dict[str, Any]] = []
+                apk_checks = validate_and_publish_apks(
+                    provider, output_apks, capabilities, args.destination
+                )
                 warnings: list[str] = []
-                for path in output_apks:
-                    with path.open("rb") as package_file:
-                        magic = package_file.read(3)
-                    if path.stat().st_size < 4 or magic != b"ADB":
-                        raise ProviderError("incompatible", f"downloaded file is not an APK v3 package: {path.name}")
-                    metadata, warning = inspect_apk_metadata(path)
-                    apk_check: dict[str, Any] = {
-                        "file": path.name,
-                        "sha256": sha256_file(path),
-                        "magic_verified": True,
-                        "metadata_status": "verified" if metadata else "unavailable",
-                        "architecture": "unknown",
-                    }
-                    if metadata:
-                        arch = metadata.get("arch")
-                        if arch and arch not in {"all", "noarch", capabilities["arch"]}:
-                            raise ProviderError(
-                                "incompatible", f"APK {path.name} architecture {arch} conflicts with {capabilities['arch']}"
-                            )
-                        apk_check["architecture"] = arch or "unknown"
-                        apk_check["package"] = metadata.get("name")
-                        apk_check["version"] = metadata.get("version")
-                        apk_check["dependencies"] = metadata.get("dependencies", [])
-                    if warning and warning not in warnings:
-                        warnings.append(warning)
-                    destination = args.destination / path.name
-                    if destination.exists():
-                        raise ProviderError("unresolved", f"duplicate third-party APK filename: {path.name}")
-                    shutil.copy2(path, destination)
-                    apk_checks.append(apk_check)
                 records.extend(provider_records)
                 statuses[provider] = compatible_status(
                     provider, cfg, capabilities, release, provider_records,
@@ -556,8 +668,8 @@ def main() -> int:
                 statuses[provider] = {"status": exc.status, "reason": exc.reason}
                 print(f"::warning title={provider} {exc.status}::{exc.reason}")
 
-    apk_files = sorted(args.destination.glob("*.apk"))
-    sums = [f"{sha256_file(path)}  {path.name}" for path in apk_files]
+    apk_files = sorted(args.destination.rglob("*.apk"))
+    sums = [f"{sha256_file(path)}  {path.relative_to(args.destination).as_posix()}" for path in apk_files]
     (args.metadata.parent / "thirdparty-sha256sums").write_text(
         "\n".join(sums) + ("\n" if sums else ""), encoding="utf-8"
     )

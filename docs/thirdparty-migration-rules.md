@@ -20,9 +20,13 @@ binds the provider and rule version to the exact target release-resolution and
 official-index digests, architecture, package manager, upstream release/assets,
 asset SHA-256 values, extracted APK checks and official dependency result. Its
 canonical evidence digest is revalidated by the Migration Plan generator, which
-also hashes the APK files actually present in `files/root/thirdparty`. A bare or
-stale `status: compatible`, evidence copied from another target, or a status
-without the matching bundled APK fails closed.
+also re-fetches the pinned GitHub release and asset metadata, verifies GitHub
+asset IDs/digests, repeats archive extraction when applicable, and hashes the
+APK files actually present in `files/root/thirdparty`. A bare or stale
+`status: compatible`, a self-consistent locally fabricated status, evidence
+copied from another target, or a status without the matching bundled APK fails
+closed. The evidence digest supplies integrity; the upstream revalidation
+supplies source authenticity.
 
 Unknown providers, missing assets, wrong architecture/package manager,
 untrusted URLs, absent digests, missing official dependencies, ambiguous
@@ -34,7 +38,10 @@ digest-matching official index; dependency validation is never skipped.
 
 The downloaded artifact digest is verified during preparation. Each extracted
 APK receives a second recorded SHA-256, and the exact `SHA256SUMS` file is
-bundled beside the APKs. On first boot, the UCI default script checks that the
+bundled beside the APKs. A provider with multiple APKs is fully validated in a
+same-filesystem staging directory and published by one directory rename only
+after every APK passes; a failed provider publishes nothing. On first boot, the
+UCI default script checks that the
 manifest and APK set match exactly and runs `sha256sum -c` before invoking
 `apk add --allow-untrusted`. This prevents post-build substitution but does not
 turn the packages into a locally signed APK repository; the remaining signing

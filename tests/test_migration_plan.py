@@ -58,14 +58,16 @@ def trusted_status(capabilities, index, package="luci-app-openclash"):
             "resolution_digest": capabilities["resolution_digest"],
             "official_index_digest": capabilities["official_index_digest"],
         },
+        "release_id": 101,
         "upstream_release": "v0.48.002",
         "assets": [{
             "provider": "openclash", "release": "v0.48.002",
+            "asset_id": 202,
             "asset": "luci-app-openclash-0.48.002.apk", "sha256": HEX,
             "url": "https://github.com/vernesong/OpenClash/releases/download/v0.48.002/luci-app-openclash-0.48.002.apk",
         }],
         "apk_checks": [{
-            "file": "luci-app-openclash-0.48.002.apk", "sha256": HEX,
+            "file": "openclash/luci-app-openclash-0.48.002.apk", "sha256": HEX,
             "magic_verified": True, "metadata_status": "verified",
             "architecture": "noarch",
         }],
@@ -161,9 +163,11 @@ def test_thirdparty_dependency_requires_and_accepts_bound_evidence():
     index = official_index()
     capabilities = target(index)
     status = trusted_status(capabilities, index)
+    trusted = {status["openclash"]["evidence_digest"]}
     plan = generate_plan(
         data, capabilities, index, rules(), status,
-        thirdparty_files={"luci-app-openclash-0.48.002.apk": HEX},
+        thirdparty_files={"openclash/luci-app-openclash-0.48.002.apk": HEX},
+        trusted_thirdparty_evidence=trusted,
     )
     row = next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")
     assert row["decision"] == "keep"
@@ -194,16 +198,19 @@ def test_forged_compatible_status_cannot_bypass_gate():
     assert next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")["decision"] == "block"
 
 
-def test_structurally_complete_status_without_matching_apk_cannot_bypass_gate():
+def test_self_consistent_status_and_local_apk_without_trusted_provenance_cannot_bypass_gate():
     data = snapshot()
     data["packages"]["installed"][-1].update(name="luci-app-openclash", origin="third_party")
     data["packages"]["top_level"] = ["luci-app-openclash"]
     index = official_index()
     capabilities = target(index)
-    plan = generate_plan(data, capabilities, index, rules(), trusted_status(capabilities, index))
+    plan = generate_plan(
+        data, capabilities, index, rules(), trusted_status(capabilities, index),
+        thirdparty_files={"openclash/luci-app-openclash-0.48.002.apk": HEX},
+    )
     row = next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")
     assert row["decision"] == "block"
-    assert "bundled APK" in row["reason"]
+    assert "trusted upstream" in row["reason"]
 
 
 def test_compatible_status_cannot_be_reused_for_other_release():
@@ -213,6 +220,7 @@ def test_compatible_status_cannot_be_reused_for_other_release():
     index = official_index()
     original = target(index)
     status = trusted_status(original, index)
+    trusted = {status["openclash"]["evidence_digest"]}
     changed = target(index)
     changed["target_version"] = "25.12.3"
     frozen = dict(changed)
@@ -220,7 +228,8 @@ def test_compatible_status_cannot_be_reused_for_other_release():
     changed["resolution_digest"] = canonical_digest(frozen)
     plan = generate_plan(
         data, changed, index, rules(), status,
-        thirdparty_files={"luci-app-openclash-0.48.002.apk": HEX},
+        thirdparty_files={"openclash/luci-app-openclash-0.48.002.apk": HEX},
+        trusted_thirdparty_evidence=trusted,
     )
     assert plan["build_allowed"] is False
     assert any("different target release" in row["reason"] for row in plan["decisions"] if row["package"] == "luci-app-openclash")
@@ -238,9 +247,11 @@ def test_thirdparty_compatible_status_cannot_hide_missing_official_dependency():
     status = statuses["openclash"]
     status["official_dependencies"]["required"] = ["ca-bundle", "missing-runtime"]
     status["evidence_digest"] = canonical_digest({key: value for key, value in status.items() if key != "evidence_digest"})
+    trusted = {status["evidence_digest"]}
     plan = generate_plan(
         data, capabilities, index, provider_rules, statuses,
-        thirdparty_files={"luci-app-openclash-0.48.002.apk": HEX},
+        thirdparty_files={"openclash/luci-app-openclash-0.48.002.apk": HEX},
+        trusted_thirdparty_evidence=trusted,
     )
     row = next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")
     assert row["decision"] == "block"

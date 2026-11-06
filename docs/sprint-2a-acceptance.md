@@ -39,6 +39,23 @@ reproduced four fail-open paths. They were not waived:
    installed package depends on it. Snapshot digest and source-version binding
    remain mandatory.
 
+The final trust-boundary review also reproduced three additional weaknesses:
+
+- A multi-APK provider could publish its first APK before a later APK failed.
+  Provider output is now validated completely in same-filesystem staging and
+  committed as one provider directory rename. A failed provider contributes no
+  file to the image or `SHA256SUMS`, in strict and non-strict modes alike.
+- Missing/failed `apk adbdump`, or missing package name, architecture, version
+  or dependency metadata, could still result in compatible status. Such cases
+  now resolve to `unresolved`; APK magic and SHA-256 alone do not establish
+  target compatibility.
+- A self-consistent evidence digest proved integrity but not origin. Before a
+  compatible status can authorize a Migration Plan, the consumer now re-fetches
+  the pinned GitHub release/assets, verifies GitHub asset IDs and digests,
+  reproduces archive extraction when applicable, and compares the result with
+  the APK bytes actually bundled. Statuses not authenticated by that trusted
+  path remain blocked.
+
 ## Safety properties and blockers
 
 - Release and package data are read-only HTTPS metadata. A missing release,
