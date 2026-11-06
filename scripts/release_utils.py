@@ -20,6 +20,11 @@ VERSION_RE = re.compile(
 )
 SHA256_LINE_RE = re.compile(r"^(?P<digest>[0-9a-f]{64})\s+\*?(?P<name>\S+)$")
 SUPPORTED_ARCHIVE_SUFFIXES = (".tar.zst", ".tar.xz", ".tar.gz")
+OFFICIAL_DOWNLOAD_ROOTS = {
+    "immortalwrt": "https://downloads.immortalwrt.org",
+    "openwrt": "https://downloads.openwrt.org",
+}
+MAX_METADATA_BYTES = 64 * 1024 * 1024
 
 
 class ReleaseValidationError(ValueError):
@@ -79,10 +84,31 @@ def parse_sha256sums(text: str) -> dict[str, str]:
     return entries
 
 
-def discover_imagebuilder(sha256sums: str, version: str) -> tuple[str, str]:
+def normalize_distribution(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in OFFICIAL_DOWNLOAD_ROOTS:
+        raise ReleaseValidationError(
+            f"Unsupported distribution {value!r}; expected OpenWrt or ImmortalWrt."
+        )
+    return normalized
+
+
+def official_download_root(distribution: str) -> str:
+    return OFFICIAL_DOWNLOAD_ROOTS[normalize_distribution(distribution)]
+
+
+def discover_imagebuilder(
+    sha256sums: str,
+    version: str,
+    *,
+    distribution: str = "immortalwrt",
+    target: str = "x86/64",
+) -> tuple[str, str]:
     parse_version(version)
+    distribution = normalize_distribution(distribution)
     entries = parse_sha256sums(sha256sums)
-    prefix = f"immortalwrt-imagebuilder-{version}-x86-64."
+    target_slug = target.replace("/", "-")
+    prefix = f"{distribution}-imagebuilder-{version}-{target_slug}."
     candidates = [
         name for name in entries
         if name.startswith(prefix) and name.endswith(SUPPORTED_ARCHIVE_SUFFIXES)
@@ -153,10 +179,7 @@ def detect_package_manager(profiles: dict[str, Any]) -> str:
         return "apk"
     if "opkg" in defaults:
         return "opkg"
-    raise ReleaseValidationError(
-        "Unsupported target package manager detected: unknown. "
-        "Repository logic currently supports APK targets only."
-    )
+    raise ReleaseValidationError("Unsupported target package manager detected: unknown.")
 
 
 def discover_feed_names(package_sha256sums: str) -> list[str]:
@@ -182,10 +205,18 @@ def build_kmod_index_url(base_url: str, profiles: dict[str, Any]) -> str:
 
 
 def get_url(url: str) -> bytes:
+    if not any(url.startswith(root + "/") for root in OFFICIAL_DOWNLOAD_ROOTS.values()) and not url.startswith("https://api.github.com/"):
+        raise ReleaseValidationError(f"Refusing metadata URL outside trusted upstreams: {url}")
     request = urllib.request.Request(url, headers={"User-Agent": "immortalwrt-migration-builder/2"})
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return response.read()
+        with urllib.request.urlopen(request, timeout=30) as response:
+            content_length = response.headers.get("Content-Length")
+            if content_length and int(content_length) > MAX_METADATA_BYTES:
+                raise ReleaseValidationError(f"Official metadata exceeds size limit: {url}")
+            data = response.read(MAX_METADATA_BYTES + 1)
+            if len(data) > MAX_METADATA_BYTES:
+                raise ReleaseValidationError(f"Official metadata exceeds size limit: {url}")
+            return data
     except urllib.error.HTTPError as exc:
         raise ReleaseValidationError(f"Official release resource is unavailable ({exc.code}): {url}") from exc
     except urllib.error.URLError as exc:
@@ -195,40 +226,64 @@ def get_url(url: str) -> bytes:
 def discover_release(
     version: str,
     *,
+    distribution: str = "immortalwrt",
+    target: str = "x86/64",
+    profile_name: str = "generic",
+    filesystem: str = "ext4",
+    image_type: str = "combined-efi",
     fetch: Callable[[str], bytes] = get_url,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     info = parse_version(version)
-    base_url = f"https://downloads.immortalwrt.org/releases/{version}/targets/x86/64"
+    distribution = normalize_distribution(distribution)
+    if "/" not in target or any(part in {"", ".", ".."} for part in target.split("/")):
+        raise ReleaseValidationError(f"Invalid target/subtarget: {target!r}")
+    base_url = f"{official_download_root(distribution)}/releases/{version}/targets/{target}"
     profiles_url = f"{base_url}/profiles.json"
     sums_url = f"{base_url}/sha256sums"
-    profiles = json.loads(fetch(profiles_url).decode("utf-8"))
+    try:
+        profiles_bytes = fetch(profiles_url)
+        profiles = json.loads(profiles_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReleaseValidationError(f"Invalid official profiles metadata: {profiles_url}") from exc
     sums_text = fetch(sums_url).decode("utf-8")
-    expected_image = resolve_image_capability(profiles)
-    package_manager = detect_package_manager(profiles)
-    if package_manager != "apk":
+    sum_entries = parse_sha256sums(sums_text)
+    expected_profiles_digest = sum_entries.get("profiles.json")
+    actual_profiles_digest = hashlib.sha256(profiles_bytes).hexdigest()
+    if not expected_profiles_digest or actual_profiles_digest != expected_profiles_digest:
         raise ReleaseValidationError(
-            f"Unsupported target package manager detected: {package_manager}. "
-            "Repository logic currently supports APK targets only."
+            f"profiles.json is not authenticated by {sums_url}"
         )
-    archive, archive_sha256 = discover_imagebuilder(sums_text, version)
+    expected_image = resolve_image_capability(
+        profiles, target=target, profile_name=profile_name,
+        filesystem=filesystem, image_type=image_type,
+    )
+    package_manager = detect_package_manager(profiles)
+    archive, archive_sha256 = discover_imagebuilder(
+        sums_text, version, distribution=distribution, target=target
+    )
     capabilities: dict[str, Any] = {
         **asdict(info),
-        "target": "x86/64",
+        "distribution": distribution,
+        "channel": "release",
+        "target": target,
+        "subtarget": target.split("/", 1)[1],
         "arch": profiles.get("arch_packages") or "x86_64",
-        "profile": "generic",
-        "filesystem": "ext4",
-        "image_type": "combined-efi",
+        "profile": profile_name,
+        "filesystem": filesystem,
+        "image_type": image_type,
         "expected_image_name": expected_image["name"],
         "expected_image_sha256": expected_image.get("sha256"),
         "package_manager": package_manager,
         "profiles_url": profiles_url,
+        "profiles_sha256": actual_profiles_digest,
         "sha256sums_url": sums_url,
         "base_url": base_url,
         "imagebuilder_filename": archive,
         "imagebuilder_sha256": archive_sha256,
         "imagebuilder_url": f"{base_url}/{archive}",
         "kernel": profiles.get("linux_kernel", {}),
-        "available_images": available_images(profiles["profiles"]["generic"]),
+        "available_images": available_images(profiles["profiles"][profile_name]),
+        "support_status": "supported" if target == "x86/64" and profile_name == "generic" else "unknown",
     }
     return capabilities, profiles
 

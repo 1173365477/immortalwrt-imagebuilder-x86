@@ -11,11 +11,9 @@ from typing import Callable
 
 import yaml
 
+from release_resolver import ReleaseRequest, resolve_release
 from release_utils import (
     ReleaseValidationError,
-    build_kmod_index_url,
-    discover_feed_names,
-    discover_release,
     get_url,
     parse_version,
     versions_equal,
@@ -90,26 +88,12 @@ def validate(args: argparse.Namespace, fetch: Callable[[str], bytes] = get_url) 
 
     if args.online:
         try:
-            capabilities, profiles = discover_release(args.version, fetch=fetch)
-            arch = capabilities["arch"]
-            package_root = f"https://downloads.immortalwrt.org/releases/{args.version}/packages/{arch}"
-            package_sums = fetch(f"{package_root}/sha256sums").decode("utf-8")
-            feeds = discover_feed_names(package_sums)
-            index_urls = [
-                f"{capabilities['base_url']}/packages/index.json",
-                build_kmod_index_url(capabilities["base_url"], profiles),
-                *(f"{package_root}/{feed}/index.json" for feed in feeds),
-            ]
-            available: dict[str, str] = {}
-            for index_url in index_urls:
-                index = json.loads(fetch(index_url))
-                available.update(index.get("packages", {}))
+            capabilities, available = resolve_release(
+                ReleaseRequest(version=args.version), fetch=fetch
+            )
             unavailable = sorted(positive - set(available))
             if unavailable:
                 errors.append(f"official package index has no entry for: {', '.join(unavailable)}")
-            capabilities["feed_names"] = feeds
-            capabilities["package_index_urls"] = index_urls
-            capabilities["official_package_count"] = len(available)
             (args.generated / "release-capabilities.json").write_text(
                 json.dumps(capabilities, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
             )

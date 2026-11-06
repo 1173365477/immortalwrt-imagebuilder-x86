@@ -84,7 +84,11 @@ def test_feed_names_are_discovered() -> None:
 def test_synthetic_future_release_capabilities() -> None:
     profiles = Path("tests/fixtures/profiles-29.0.json").read_bytes()
     archive = "immortalwrt-imagebuilder-29.0.1-x86-64.Linux-x86_64.tar.zst"
-    sums = f"{'d' * 64}  {archive}\n".encode()
+    import hashlib
+    sums = (
+        f"{hashlib.sha256(profiles).hexdigest()}  profiles.json\n"
+        f"{'d' * 64}  {archive}\n"
+    ).encode()
 
     def fetch(url: str) -> bytes:
         return profiles if url.endswith("profiles.json") else sums
