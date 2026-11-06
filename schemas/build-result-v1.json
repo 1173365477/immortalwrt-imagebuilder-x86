@@ -17,7 +17,7 @@
   },
   "allOf": [
     {"if": {"properties": {"status": {"const": "ok"}}}, "then": {"properties": {"build_allowed": {"const": true}, "blockers": {"maxItems": 0}, "errors": {"maxItems": 0}, "artifacts": {"minItems": 1}}}},
-    {"if": {"properties": {"status": {"enum": ["blocked", "failed", "unknown"]}}}, "then": {"properties": {"build_allowed": {"const": false}}}},
+    {"if": {"properties": {"status": {"enum": ["partial", "blocked", "failed", "unknown"]}}}, "then": {"properties": {"build_allowed": {"const": false}}}},
     {"if": {"properties": {"status": {"const": "failed"}}}, "then": {"properties": {"errors": {"minItems": 1}}}}
   ],
   "$defs": {"status": {"enum": ["ok", "partial", "blocked", "failed", "unknown"]}, "hex": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "urn": {"type": "string", "pattern": "^urn:sha256:[a-f0-9]{64}$"}}

@@ -89,6 +89,49 @@ def test_unknown_target_cannot_allow_build():
         validator("migration-plan-v1.json").validate(sample)
 
 
+@pytest.mark.parametrize("status", ["partial", "blocked", "failed", "unknown"])
+def test_incomplete_build_result_cannot_allow_build(status):
+    sample = copy.deepcopy(VALID_BUILD)
+    sample["status"] = status
+    sample["build_allowed"] = True
+    if status != "failed":
+        sample["errors"] = []
+    with pytest.raises(ValidationError):
+        validator("build-result-v1.json").validate(sample)
+
+
+def test_partial_build_result_is_valid_only_when_fail_closed():
+    sample = copy.deepcopy(VALID_BUILD)
+    sample.update(status="partial", build_allowed=False, errors=[])
+    validator("build-result-v1.json").validate(sample)
+
+
+def test_migration_plan_partial_cannot_allow_build():
+    sample = copy.deepcopy(VALID_PLAN)
+    sample.update(status="partial", build_allowed=True)
+    with pytest.raises(ValidationError):
+        validator("migration-plan-v1.json").validate(sample)
+
+
+@pytest.mark.parametrize("mutation", ["missing_artifact", "missing_plan_id", "bad_plan_digest"])
+def test_successful_build_requires_artifact_and_valid_plan_link(mutation):
+    sample = copy.deepcopy(VALID_BUILD)
+    sample.update(
+        status="ok",
+        build_allowed=True,
+        errors=[],
+        artifacts=[{"name": "firmware.img.gz", "sha256": HEX, "size_bytes": 1}],
+    )
+    if mutation == "missing_artifact":
+        sample["artifacts"] = []
+    elif mutation == "missing_plan_id":
+        del sample["source_plan_id"]
+    else:
+        sample["source_plan_digest"] = "not-a-sha256"
+    with pytest.raises(ValidationError):
+        validator("build-result-v1.json").validate(sample)
+
+
 @pytest.mark.parametrize("schema,sample", [
     ("migration-plan-v1.json", {**VALID_PLAN, "flash_ready": True}),
     ("build-result-v1.json", {**VALID_BUILD, "flash_ready": True}),
