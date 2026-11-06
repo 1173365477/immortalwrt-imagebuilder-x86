@@ -6,7 +6,7 @@ Safety boundary: no router connection, package mutation, source refresh, service
 
 ## Outcome
 
-The baseline HEAD had not changed when remediation began. The changes are incremental and retain the existing Actions inputs, analyzer CLI flags, report names and firmware build entry point. Unknown evidence remains unknown or becomes an explicit review/block decision. The latest implementation CI is green; `flash_ready` is unconditionally false in the v1 protocol.
+The baseline HEAD had not changed when remediation began. The changes are incremental and retain the existing Actions inputs, analyzer CLI flags, report names and firmware build entry point. Unknown evidence remains unknown or becomes an explicit review/block decision. The four findings from the final review of `a43f3ecbf19a80579444082d357e51c629330cd1` were remediated at implementation HEAD `4fa7b7ad38ba828a7d042414ad22d4ee7660a4b1`; [Project self-test #57](https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/42156307171) passed on that exact tree. `flash_ready` remains unconditionally false in the v1 protocol.
 
 ## Original findings and remediation
 
@@ -29,8 +29,8 @@ The baseline HEAD had not changed when remediation began. The changes are increm
 | T01 repository audit | `docs/sprint-0-audit.md`; this report | full suite and diff review | Baseline and safety boundaries recorded; issues mapped to fixes | Audit is scoped to PR and relevant pre-existing build path | PASS |
 | T02 target version parsing | `.github/workflows/build.yml` release step; `scripts/resolve_version.py` | `test_build_version_is_taken_from_dispatch_input_not_self_reference`; existing release tests | Dispatch input is consumed before the step output exists; downstream output name retained | Online release metadata remains time-dependent | PASS |
 | T03 three v1 Schemas | `schemas/*.json`; `docs/schema-v1-protocol.md` | positive/negative cases in `test_schema_contracts.py`, including incomplete Docker scans and invalid safety states | Required trace, status, privacy, blocker and MVP no-flash semantics enforced. Snapshot canonicalization v2 binds dynamic storage/device evidence | Historical `system-analysis.json` intentionally remains a separate legacy artifact | PASS |
-| T04 CI baseline | `.github/workflows/ci.yml` | 80 pytest cases; actionlint; ShellCheck; workflow regressions | Local suite and GitHub-hosted online validation pass | Online release metadata remains external and time-dependent | PASS |
-| T05 identity and package manager | scanner; `identity-compat.py` | realistic OPKG/APK, non-installed, EFI/BIOS/unknown, DMI negative regression and architecture conflict tests | All uncertain values remain explicit; DMI vendor presence is not treated as Legacy BIOS proof | Hardware-specific ubus/sysfs variants beyond fixtures remain possible and must return unknown | PASS |
+| T04 CI baseline | `.github/workflows/ci.yml` | 107 pytest cases; actionlint; ShellCheck; workflow regressions; Artifact safety integration | Local suite and GitHub-hosted online validation pass | Online release metadata remains external and time-dependent | PASS |
+| T05 identity and package manager | scanner; `identity-compat.py` | realistic OPKG/APK, EFI sysfs positive case, DMI/config/absence negative cases and architecture conflicts | EFI has affirmative kernel evidence; no reliable universal Legacy BIOS affirmative adapter was identified, so uncertainty remains unknown and blocks image selection | Legacy BIOS detection completeness remains limited by the Linux evidence boundary | PARTIAL |
 | T06 origin/install reason | scanner ROM baselines and optional read-only ROM origin manifest | official/third-party/unknown, manual/dependency/default/unknown tests | Origin is independent from intent; no feed origin is guessed | Existing devices without ROM origin evidence classify non-default origin as unknown | PASS |
 | T07 top-level fallback | parser/resolver and `package-decisions.json` | missing, empty, partial, complete and explicit-ignore conflict tests | Every installed package receives keep/replace/skip/block/review evidence; strict mode sees unresolved rows | A complete list still depends on truthful package-manager metadata | PASS |
 | T08 services and storage | scanner plus storage module | daemon mismatch, same-disk/different-disk partitions, stopped-container bind, unused volume, 64-container truncation, query/inspect failures, nested mount, symlink, no Docker and missing mountinfo | Persistence and whole-disk overwrite exposure are independent. All containers and volumes are enumerated; incomplete scans are partial | Scanner observes its mount namespace; inaccessible daemon/sysfs or ambiguous firmware disk remains unknown. Docker socket must never be delegated to LuCI/RPC users | PASS |
@@ -38,11 +38,11 @@ The baseline HEAD had not changed when remediation began. The changes are increm
 
 ## Verification
 
-- `pytest -q`: **80 passed**.
+- `pytest -q`: **107 passed**.
 - ShellCheck 0.10.0: passed for `smart-upgrade-agent.sh`, `smart-upgrade-storage.sh`, existing build script and first-boot script.
 - actionlint 1.7.7: passed for all workflows.
 - `git diff --check`: passed.
-- GitHub Actions implementation run: [Project self-test #47](https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/42008119694) — all steps passed.
+- GitHub Actions implementation run: [Project self-test #57](https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/42156307171) at `4fa7b7ad38ba828a7d042414ad22d4ee7660a4b1` — actionlint, syntax/YAML, ShellCheck, 107 pytest cases, fixture analysis, official 25.12.2 indexes, version mismatch rejection and strict-mode rejection all passed.
 
 No firmware build was executed as part of this acceptance. The existing online index validation remains in GitHub CI and does not certify a produced image for flashing.
 
@@ -57,6 +57,10 @@ No firmware build was executed as part of this acceptance. The existing online i
 7. `1416641` — satisfy actionlint workflow shell checking without lowering rules.
 8. `7663717` — harden Docker enumeration, physical-disk risk, snapshot evidence and boot detection.
 9. `50796a2` — satisfy ShellCheck without suppressing the volume-fixture guard.
+10. `4287ab3` — fail closed when a build result is partial, blocked, failed or unknown.
+11. `245865b` — validate metadata and gate every Artifact upload on a clean output scan.
+12. `a5ed8aa` — recursively resolve dm/md slaves to complete physical-disk sets.
+13. `4fa7b7a` — record affirmative EFI evidence while keeping unsupported BIOS conclusions unknown.
 
 ## Targeted follow-up review at PR HEAD
 
@@ -65,11 +69,22 @@ The follow-up started from remote HEAD `b3ed1aec30b0cad8edfcc6ae9b4a1798434238c6
 | Area | Code evidence | Regression evidence | Known limit | Re-acceptance |
 |---|---|---|---|---|
 | T03 snapshot contract | `schemas/system-snapshot-v1.json:53,64-87`; `docs/schema-v1-protocol.md:7`; `scripts/smart-upgrade-agent.sh:55-78,265` | `tests/test_smart_upgrade_agent.py:386-402` (`test_snapshot_id_changes_with_dynamic_storage_and_identity_evidence`); `tests/test_schema_contracts.py:63-82` (`test_storage_contract_rejects_implicit_upgrade_safety_or_missing_completeness`) | v2 is evidence canonicalization, not RFC 8785 JSON canonicalization | PASS |
-| T05 boot identity | `scripts/smart-upgrade-agent.sh:93-128` | `tests/test_smart_upgrade_agent.py:405-421` (`test_dmi_vendor_is_not_legacy_bios_evidence`); existing `test_identity_uses_injected_read_only_evidence` | Legacy BIOS remains unknown unless an audited adapter supplies affirmative evidence | PASS |
+| T05 boot identity | `scripts/smart-upgrade-agent.sh` identity adapter | `test_dmi_vendor_is_not_legacy_bios_evidence`; `test_linux_efi_sysfs_is_affirmative_read_only_evidence`; `test_efi_capable_kernel_without_efi_sysfs_does_not_prove_legacy_bios` | Legacy BIOS remains unknown unless an audited adapter supplies affirmative evidence | PARTIAL |
 | T08 Docker/storage | `scripts/smart-upgrade-storage.sh:66-186,198-243,244-304` | `tests/test_smart_upgrade_agent.py:295-383` (`test_separate_partition_does_not_imply_firmware_overwrite_safety`, `test_all_container_states_and_unused_volumes_are_in_scan_scope`, incomplete-enumeration parameter cases and symlink regression) | A different physical disk is lower exposure to whole-firmware-disk overwrite, not a claim that upgrade/partition tooling is safe | PASS |
 | T09 conservative failure/privacy | `scripts/smart-upgrade-storage.sh:67-68,171-186,287-303`; `schemas/system-snapshot-v1.json:74-87` | `tests/test_smart_upgrade_agent.py:348-402`; `tests/test_schema_contracts.py:56-82` | Docker metadata queries require privileged local access and must not be exposed through generic LuCI/RPC | PASS |
 
 Targeted implementation CI: [Project self-test #53](https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/42024934027) — all steps passed.
+
+## Final blocking-review remediation
+
+Review source: [CHANGES REQUIRED on `a43f3ec`](https://github.com/1173365477/immortalwrt-imagebuilder-x86/pull/21#issuecomment-6675669414).
+
+| Finding | Before | Remediation / Commit | Reproducible regression evidence | After |
+|---|---|---|---|---|
+| Partial build result remained build-allowed | Draft 2020-12 validator accepted `partial + build_allowed=true` | Status condition now forces false for every non-ok state; migration-plan was cross-checked (`4287ab3`) | `test_incomplete_build_result_cannot_allow_build`; `test_partial_build_result_is_valid_only_when_fail_closed`; `test_successful_build_requires_artifact_and_valid_plan_link` | Invalid combinations are rejected; complete fail-closed partial sample validates |
+| Sensitive owut metadata reached an uploaded JSON | `Version-from  password=TEST_SECRET...` survived as `source_version` | Strict field grammars, safe error codes, bounded output scanner and upload dependency gate (`245865b`) | `test_parser_and_artifact_gate_never_emit_injected_secret`; `test_artifact_gate_blocks_secret_without_echoing_it`; `test_artifact_uploads_require_successful_safety_gate` | Marker is absent from JSON, Markdown, package outputs and diagnostics; unsafe output prevents upload |
+| dm/md names were treated as physical disks | dm-0 root plus dm-1 data could report `different_physical_disk` | Recursive sysfs slave resolution, deduplicated physical sets, cycle/depth guards and anonymous redacted relationships (`a5ed8aa`) | `test_dm_devices_compare_recursive_physical_disk_sets`; `test_multi_slave_virtual_device_retains_all_physical_parents`; `test_nested_dm_md_chain_resolves_recursively`; `test_incomplete_or_invalid_virtual_topology_is_unknown`; ordinary NVMe and all-target consistency cases | Intersection means same-disk exposure; proven disjoint sets mean different disk; incomplete sets remain unknown |
+| No real-device affirmative Legacy BIOS adapter | Only a test override could produce BIOS | Kernel EFI sysfs is recorded as positive EFI evidence; absence, DMI, architecture, partition table and kernel capability remain inconclusive (`4fa7b7a`) | EFI positive test plus DMI and EFI-capable-kernel/absent-sysfs negative tests | T05 remains PARTIAL; unknown still blocks both EFI and legacy automatic image selection |
 
 ## Legacy BIOS evidence decision
 
@@ -109,7 +124,9 @@ This is a distinct future mutation boundary: (1) local scanner is read-only, (2)
 5. Freeze official and third-party metadata identities in the build request; emit run ID, attempt, Commit and Artifact digests in build-result.
 6. Keep automatic flash, reboot, partition changes and rollback outside scope until storage blockers, image identity and backup/restore evidence have independent acceptance.
 
-## Ready-for-review decision
+## Final re-review decision
 
-The code-level Sprint 0–1 criteria and current CI satisfy the conditions for **Ready for Review**. This task leaves the PR in Draft so the repository owner can make the explicit state transition after reading the security boundary and first-boot risk section. Any future P0 regression, unknown-to-compatible coercion, or first-boot trust change returns the decision to blocked. Ready for Review would not authorize merge, image flashing or router mutation.
+All HIGH findings from the final blocking review have code fixes, positive/negative regressions and a successful GitHub Runner result. T03, T04, T08 and T09 are PASS. T05 remains PARTIAL only for affirmative Legacy BIOS detection completeness: this does not create an unsafe compatibility claim because `unknown` is preserved and both EFI and legacy automatic image selection remain blocked. It is therefore not a remaining HIGH merge blocker for the read-only Sprint 0–1 scanner, but it must not be relabeled PASS without new audited evidence.
+
+The author-side implementation status is **READY FOR FINAL RE-REVIEW**. This is not an approval or merge authorization. PR #21 must remain unmerged until an independent final review accepts the new HEAD and the repository owner explicitly authorizes merge. No firmware build, flash, router access, Issue closure or main-branch modification was performed.
 
