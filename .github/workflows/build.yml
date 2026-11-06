@@ -76,7 +76,7 @@ jobs:
       - name: Resolve stable target version
         id: release
         env:
-          REQUESTED_VERSION: ${{ steps.release.outputs.version }}
+          REQUESTED_VERSION: ${{ inputs.immortalwrt_version }}
         run: |
           set -euo pipefail
           python scripts/resolve_version.py --version "$REQUESTED_VERSION"
@@ -151,8 +151,13 @@ jobs:
           STRICT_MODE: ${{ inputs.strict_mode }}
         run: scripts/build-image.sh
 
-      - name: Upload firmware and migration evidence
+      - name: Validate Artifact safety
+        id: artifact_safety
         if: always()
+        run: python scripts/validate-artifacts.py --path generated
+
+      - name: Upload firmware and migration evidence
+        if: ${{ always() && steps.artifact_safety.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: immortalwrt-${{ steps.release.outputs.version || 'unresolved' }}-x86-64-generic-${{ github.run_number }}${{ steps.thirdparty.outputs.suffix }}
@@ -165,6 +170,7 @@ jobs:
             generated/packages-missing.txt
             generated/packages-skipped.txt
             generated/packages-replaced.txt
+            generated/package-decisions.json
             generated/release-capabilities.json
             generated/official-package-index.json
             generated/thirdparty-status.json

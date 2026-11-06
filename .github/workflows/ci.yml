@@ -6,6 +6,7 @@ on:
       - main
       - feature/generic-release-support
       - feature/latest-stable-build
+      - feature/smart-upgrade-*
   pull_request:
 
 permissions:
@@ -31,6 +32,15 @@ jobs:
           sudo apt-get install --yes shellcheck
           python -m pip install --requirement requirements-dev.txt
 
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: "1.7.7"
+        run: go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"
+
+      - name: Validate GitHub Actions semantics
+        run: |
+          "$(go env GOPATH)/bin/actionlint" -color
+
       - name: Validate YAML and Python syntax
         run: |
           set -euo pipefail
@@ -46,7 +56,9 @@ jobs:
           PY
 
       - name: Run ShellCheck
-        run: shellcheck -x scripts/build-image.sh files/etc/uci-defaults/99-install-thirdparty
+        run: |
+          shellcheck -x scripts/build-image.sh files/etc/uci-defaults/99-install-thirdparty
+          shellcheck -s sh scripts/smart-upgrade-agent.sh scripts/smart-upgrade-storage.sh
 
       - name: Run unit and future-release fixture tests
         run: pytest -q
@@ -55,14 +67,14 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/parse-owut-report.py \
-            --report reports/current-system.txt.example \
-            --installed reports/installed-packages.txt.example \
-            --top-level reports/top-level-packages.txt.example
+            --report reports/current-system.txt \
+            --installed reports/installed-packages.txt \
+            --top-level reports/top-level-packages.txt
           python scripts/resolve-packages.py \
             --include-openclash true \
             --include-nikki true \
             --include-lucky true
-          grep -q '^bandix' generated/packages-missing.txt
+          grep -q '^unknown-provenance' generated/packages-missing.txt
           grep -q '^openclash:luci-app-openclash$' generated/packages-thirdparty.txt
 
       - name: Validate official 25.12.2 package indexes
@@ -80,7 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           if python scripts/validate-manifest.py --version 25.12.2 --strict; then
-            echo "strict mode unexpectedly accepted the unresolved Bandix fixture" >&2
+            echo "strict mode unexpectedly accepted missing top-level provenance" >&2
             exit 1
           fi
-          echo "strict mode correctly rejected the unresolved fixture"
+          echo "strict mode correctly rejected unknown package provenance"

@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/1173365477/immortalwrt-imagebuilder-x86/schemas/system-snapshot-v1.json",
+  "title": "OpenWrt Smart Upgrade system snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "patternProperties": {"^x-[a-z0-9][a-z0-9-]*$": true},
+  "required": ["schema_version", "snapshot_id", "digest", "status", "privacy_mode", "system", "packages", "services", "storage", "warnings", "errors"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "snapshot_id": {"type": "string", "pattern": "^urn:sha256:[a-f0-9]{64}$"},
+    "digest": {"$ref": "#/$defs/digest"},
+    "status": {"$ref": "#/$defs/status"},
+    "privacy_mode": {"enum": ["local", "redacted"]},
+    "warnings": {"type": "array", "items": {"type": "string", "maxLength": 1000}, "maxItems": 256},
+    "errors": {"type": "array", "items": {"type": "string", "maxLength": 1000}, "maxItems": 256},
+    "system": {
+      "type": "object", "additionalProperties": false,
+      "required": ["distribution", "version", "target", "profile", "architecture", "package_architecture", "kernel_architecture", "boot_mode", "boot_evidence", "rootfs_type", "firmware_image_type", "package_manager", "identity_status", "identity_errors"],
+      "properties": {
+        "distribution": {"type": "string", "maxLength": 128}, "version": {"type": ["string", "null"], "maxLength": 128},
+        "target": {"type": ["string", "null"], "maxLength": 128}, "profile": {"type": ["string", "null"], "maxLength": 128},
+        "architecture": {"type": ["string", "null"], "maxLength": 128}, "package_architecture": {"type": ["string", "null"], "maxLength": 128},
+        "kernel_architecture": {"type": ["string", "null"], "maxLength": 128}, "boot_mode": {"enum": ["efi", "bios", "unknown"]}, "boot_evidence": {"enum": ["linux_efi_sysfs", "fixture_override", "no_affirmative_evidence"]},
+        "rootfs_type": {"type": "string", "maxLength": 64}, "firmware_image_type": {"type": "string", "maxLength": 128},
+        "package_manager": {"enum": ["opkg", "apk", "unknown"]}, "identity_status": {"enum": ["consistent", "conflict", "unknown"]},
+        "identity_errors": {"type": "array", "items": {"type": "string", "maxLength": 256}, "maxItems": 32}
+      }
+    },
+    "packages": {
+      "type": "object", "additionalProperties": false,
+      "required": ["installed", "top_level", "intent_candidates", "classification_status", "truncated"],
+      "properties": {
+        "installed": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/package"}},
+        "top_level": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/packageName"}},
+        "intent_candidates": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/packageName"}},
+        "classification_status": {"enum": ["complete", "partial", "unknown"]}, "truncated": {"type": "boolean"}
+      }
+    },
+    "services": {
+      "type": "object", "additionalProperties": false, "required": ["openclash", "lucky", "adguardhome", "docker"],
+      "properties": {"openclash": {"$ref": "#/$defs/service"}, "lucky": {"$ref": "#/$defs/service"}, "adguardhome": {"$ref": "#/$defs/service"}, "docker": {"$ref": "#/$defs/service"}}
+    },
+    "storage": {"$ref": "#/$defs/storage"}
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "ok"}}}, "then": {"properties": {"errors": {"maxItems": 0}, "packages": {"properties": {"classification_status": {"const": "complete"}, "truncated": {"const": false}}}, "system": {"properties": {"identity_status": {"const": "consistent"}}}, "storage": {"properties": {"status": {"const": "ok"}}}}}},
+    {"if": {"properties": {"status": {"const": "failed"}}}, "then": {"properties": {"errors": {"minItems": 1}}}},
+    {"if": {"properties": {"privacy_mode": {"const": "redacted"}}}, "then": {"properties": {"storage": {"$ref": "#/$defs/redactedStorage"}}}}
+  ],
+  "$defs": {
+    "status": {"enum": ["ok", "partial", "blocked", "failed", "unknown"]},
+    "digest": {"type": "object", "additionalProperties": false, "required": ["algorithm", "canonicalization", "value"], "properties": {"algorithm": {"const": "sha256"}, "canonicalization": {"const": "evidence-sha256-v2"}, "value": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}},
+    "packageName": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+_.@-]*$", "maxLength": 256},
+    "dependency": {"type": "object", "additionalProperties": false, "required": ["raw", "relation", "name", "operator", "version"], "properties": {"raw": {"type": "string", "maxLength": 1024}, "relation": {"enum": ["package", "soname", "virtual", "unknown"]}, "name": {"anyOf": [{"$ref": "#/$defs/packageName"}, {"type": "null"}]}, "operator": {"enum": [">=", "<=", "=", ">", "<", "~", null]}, "version": {"type": ["string", "null"], "maxLength": 512}, "parse_error": {"type": ["string", "null"], "maxLength": 256}}},
+    "package": {"type": "object", "additionalProperties": false, "required": ["name", "version", "origin", "install_reason", "confidence", "evidence", "dependencies_raw", "depends", "provides_raw"], "properties": {
+      "name": {"$ref": "#/$defs/packageName"}, "version": {"type": ["string", "null"], "maxLength": 512},
+      "origin": {"enum": ["official", "third_party", "unknown"]}, "install_reason": {"enum": ["system_default", "manual", "dependency", "unknown"]},
+      "confidence": {"enum": ["high", "medium", "low"]}, "evidence": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "maxLength": 256}},
+      "dependencies_raw": {"type": ["string", "null"], "maxLength": 8192}, "depends": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/dependency"}},
+      "provides_raw": {"type": ["string", "null"], "maxLength": 8192}
+    }},
+    "service": {"type": "object", "additionalProperties": false, "required": ["package_detected", "executable_exists", "service_definition_exists", "running"], "properties": {"package_detected": {"type": ["boolean", "null"]}, "executable_exists": {"type": ["boolean", "null"]}, "service_definition_exists": {"type": ["boolean", "null"]}, "running": {"enum": ["running", "stopped", "unknown"]}}},
+    "mount": {"type": "object", "additionalProperties": false, "required": ["id", "mountpoint", "device", "device_major_minor", "filesystem", "root", "block_resolution", "size_bytes", "risk", "physical_disk_id", "physical_disk_ids", "physical_disk", "physical_disks", "partition"], "properties": {"id": {"type": "string", "pattern": "^mount-[1-9][0-9]*$"}, "mountpoint": {"type": ["string", "null"]}, "device": {"type": ["string", "null"]}, "device_major_minor": {"type": ["string", "null"]}, "filesystem": {"type": "string"}, "root": {"type": ["string", "null"]}, "block_resolution": {"enum": ["resolved", "unknown"]}, "size_bytes": {"type": ["integer", "null"], "minimum": 0}, "risk": {"enum": ["external_persistent", "rootfs_or_overlay", "special_mount", "unknown"]}, "physical_disk_id": {"type": ["string", "null"], "pattern": "^disk-[1-9][0-9]*$"}, "physical_disk_ids": {"type": "array", "uniqueItems": true, "maxItems": 16, "items": {"type": "string", "pattern": "^disk-[1-9][0-9]*$"}}, "physical_disk": {"type": ["string", "null"]}, "physical_disks": {"type": ["array", "null"], "maxItems": 16, "items": {"type": "string", "maxLength": 128}}, "partition": {"type": ["string", "null"]}}},
+    "target": {"type": "object", "additionalProperties": false, "required": ["kind", "source", "destination", "name", "mount_id", "risk", "persistence", "firmware_overwrite_risk", "verified"], "properties": {"kind": {"enum": ["docker_root", "bind", "volume"]}, "source": {"type": ["string", "null"]}, "destination": {"type": ["string", "null"]}, "name": {"type": ["string", "null"]}, "mount_id": {"type": ["string", "null"]}, "risk": {"enum": ["external_persistent", "rootfs_or_overlay", "special_mount", "unknown"]}, "persistence": {"enum": ["rootfs_bound", "separate_mount", "special_mount", "unknown"]}, "firmware_overwrite_risk": {"enum": ["same_physical_disk", "different_physical_disk", "unknown"]}, "verified": {"type": "boolean"}}},
+    "storage": {"type": "object", "additionalProperties": false, "required": ["status", "evidence_digest", "scan_completeness", "docker", "mount_inventory", "targets", "errors"], "properties": {
+      "status": {"$ref": "#/$defs/status"},
+      "evidence_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+      "scan_completeness": {"type": "object", "additionalProperties": false, "required": ["containers", "volumes", "mounts", "container_scope", "volume_scope"], "properties": {"containers": {"enum": ["verified", "partial", "unavailable"]}, "volumes": {"enum": ["verified", "partial", "unavailable"]}, "mounts": {"enum": ["verified", "partial", "unavailable"]}, "container_scope": {"enum": ["all", "unknown"]}, "volume_scope": {"enum": ["all", "unknown"]}}},
+      "docker": {"type": "object", "additionalProperties": false, "required": ["installed", "daemon_state", "root", "configured_root", "root_source", "verified", "config_mismatch"], "properties": {"installed": {"type": "boolean"}, "daemon_state": {"enum": ["verified", "unavailable", "permission_denied", "unknown"]}, "root": {"type": ["string", "null"]}, "configured_root": {"type": ["string", "null"]}, "root_source": {"enum": ["docker_daemon", "uci", "daemon_json", "none"]}, "verified": {"type": "boolean"}, "config_mismatch": {"type": "boolean"}}},
+      "mount_inventory": {"type": "object", "additionalProperties": false, "required": ["state", "truncated", "entries"], "properties": {"state": {"enum": ["complete", "partial", "missing"]}, "truncated": {"type": "boolean"}, "entries": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/mount"}}}},
+      "targets": {"type": "array", "maxItems": 512, "items": {"$ref": "#/$defs/target"}}, "errors": {"type": "array", "items": {"type": "string", "maxLength": 256}}
+    },
+    "allOf": [
+      {"if": {"properties": {"docker": {"properties": {"installed": {"const": true}}}, "scan_completeness": {"properties": {"containers": {"enum": ["partial", "unavailable"]}}}}}, "then": {"properties": {"status": {"enum": ["partial", "blocked", "failed", "unknown"]}}}},
+      {"if": {"properties": {"docker": {"properties": {"installed": {"const": true}}}, "scan_completeness": {"properties": {"volumes": {"enum": ["partial", "unavailable"]}}}}}, "then": {"properties": {"status": {"enum": ["partial", "blocked", "failed", "unknown"]}}}},
+      {"if": {"properties": {"docker": {"properties": {"installed": {"const": true}}}, "scan_completeness": {"properties": {"mounts": {"enum": ["partial", "unavailable"]}}}}}, "then": {"properties": {"status": {"enum": ["partial", "blocked", "failed", "unknown"]}}}},
+      {"if": {"properties": {"targets": {"contains": {"properties": {"firmware_overwrite_risk": {"const": "unknown"}}, "required": ["firmware_overwrite_risk"]}}}}, "then": {"properties": {"status": {"enum": ["partial", "blocked", "failed", "unknown"]}}}}
+    ]},
+    "redactedStorage": {
+      "allOf": [
+        {"$ref": "#/$defs/storage"},
+        {"properties": {
+          "docker": {"properties": {"root": {"type": "null"}, "configured_root": {"type": "null"}}},
+          "mount_inventory": {"properties": {"entries": {"items": {"properties": {"mountpoint": {"type": "null"}, "device": {"type": "null"}, "device_major_minor": {"type": "null"}, "root": {"type": "null"}, "physical_disk": {"type": "null"}, "physical_disks": {"type": "null"}, "partition": {"type": "null"}}}}}},
+          "targets": {"items": {"properties": {"source": {"type": "null"}, "destination": {"type": "null"}, "name": {"type": "null"}}}}
+        }}
+      ]
+    }
+  }
+}

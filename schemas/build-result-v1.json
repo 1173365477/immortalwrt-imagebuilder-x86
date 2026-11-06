@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/1173365477/immortalwrt-imagebuilder-x86/schemas/build-result-v1.json",
+  "type": "object", "additionalProperties": false, "patternProperties": {"^x-[a-z0-9][a-z0-9-]*$": true},
+  "required": ["schema_version", "build_id", "request_id", "source_plan_id", "source_plan_digest", "status", "build_allowed", "flash_ready", "target_version", "trace", "artifacts", "blockers", "warnings", "errors"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"}, "build_id": {"$ref": "#/$defs/urn"}, "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "source_plan_id": {"$ref": "#/$defs/urn"}, "source_plan_digest": {"$ref": "#/$defs/hex"}, "status": {"$ref": "#/$defs/status"},
+    "build_allowed": {"type": "boolean"}, "flash_ready": {"const": false}, "target_version": {"type": "string", "minLength": 1},
+    "trace": {"type": "object", "additionalProperties": false, "required": ["repository", "commit_sha", "workflow_run_id", "workflow_run_attempt"], "properties": {
+      "repository": {"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"}, "commit_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+      "workflow_run_id": {"type": "integer", "minimum": 1}, "workflow_run_attempt": {"type": "integer", "minimum": 1}
+    }},
+    "artifacts": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["name", "sha256", "size_bytes"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 512}, "sha256": {"$ref": "#/$defs/hex"}, "size_bytes": {"type": "integer", "minimum": 0}}}},
+    "blockers": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 512},
+    "warnings": {"type": "array", "items": {"type": "string"}}, "errors": {"type": "array", "items": {"type": "string"}}
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "ok"}}}, "then": {"properties": {"build_allowed": {"const": true}, "blockers": {"maxItems": 0}, "errors": {"maxItems": 0}, "artifacts": {"minItems": 1}}}},
+    {"if": {"properties": {"status": {"enum": ["partial", "blocked", "failed", "unknown"]}}}, "then": {"properties": {"build_allowed": {"const": false}}}},
+    {"if": {"properties": {"status": {"const": "failed"}}}, "then": {"properties": {"errors": {"minItems": 1}}}}
+  ],
+  "$defs": {"status": {"enum": ["ok", "partial", "blocked", "failed", "unknown"]}, "hex": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "urn": {"type": "string", "pattern": "^urn:sha256:[a-f0-9]{64}$"}}
+}

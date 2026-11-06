@@ -111,15 +111,26 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
     base = set(read_package_file(args.base))
     installed = set(analysis.get("installed_packages", [])) | set(analysis.get("packages", {}))
     primary = set(analysis.get("top_level_packages", [])) | set(analysis.get("user_installed_packages", []))
+    package_evidence = analysis.get("package_evidence", {})
+    manifest = analysis.get("top_level_manifest", {"state": "missing"})
 
     official: set[str] = {item for item in base if not item.startswith("-")}
     removals: set[str] = {item for item in base if item.startswith("-")}
     missing: set[str] = set()
+    # Missing top-level provenance must block strict migration rather than silently
+    # treating the unknown package set as removable dependencies.
+    if installed and manifest.get("state") != "complete":
+        missing.add(
+            "unknown-provenance\t"
+            f"top-level/user-installed manifest is {manifest.get('state', 'missing')}; "
+            "manual package classification required"
+        )
     skipped: set[str] = set()
     replaced: set[str] = set()
     thirdparty: set[str] = set()
     features: list[str] = []
     provider_requests: set[str] = set()
+    decisions: dict[str, dict[str, Any]] = {}
 
     replacements = dict(rules.get("replacements", {}))
     try:
@@ -152,12 +163,45 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
         package for package in installed
         if package.startswith("kmod-") and any(pattern.fullmatch(package) for pattern in kernel_patterns)
     )
+    # Every installed package must have either explicit migration intent or
+    # positive dependency/default evidence.  Reverse dependencies are never
+    # treated as user intent and an incomplete primary list is not trusted.
+    for package in sorted(installed):
+        proof = package_evidence.get(package, {})
+        reason = proof.get("install_reason", "unknown")
+        if package in primary:
+            decisions[package] = {
+                "decision": "keep",
+                "reason": "explicit top-level/user-installed evidence",
+                "evidence": proof.get("evidence", []) + ["primary-manifest"],
+            }
+        elif reason == "dependency":
+            decisions[package] = {
+                "decision": "skip",
+                "reason": "package manager explicitly marks automatic dependency; target resolver will recalculate",
+                "evidence": proof.get("evidence", []),
+            }
+        elif reason == "system_default":
+            decisions[package] = {
+                "decision": "skip",
+                "reason": "source firmware default; target firmware baseline will provide defaults",
+                "evidence": proof.get("evidence", []),
+            }
+        elif package not in candidates:
+            decisions[package] = {
+                "decision": "review",
+                "reason": "installation reason is not proven and package is absent from explicit primary manifest",
+                "evidence": proof.get("evidence", []),
+            }
+            missing.add(f"{package}\tunknown install reason; explicit keep/skip decision required")
     for package in sorted(candidates):
         details = analysis.get("packages", {}).get(package, {})
         status = details.get("status", "unknown")
         if package in remove:
             removals.add(f"-{package}")
             skipped.add(f"{package}\tremoved because a conflicting replacement is selected")
+            if package in installed:
+                decisions[package] = {"decision": "skip", "reason": "conflicting replacement selected", "evidence": ["remove-if-present-rule"]}
             continue
         # The current owut report is authoritative. Static rules only fill gaps
         # when owut did not emit replacement metadata.
@@ -166,16 +210,24 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
             if target and VALID_PACKAGE.fullmatch(target):
                 official.add(target)
                 replaced.add(f"{package} -> {target}\towut replacement")
+                decisions[package] = {"decision": "replace", "reason": f"owut replacement: {target}", "evidence": ["owut-package-change"]}
             else:
                 skipped.add(f"{package}\tremoved/replaced by target defaults")
+                decisions[package] = {"decision": "skip", "reason": "owut reports removal by target defaults", "evidence": ["owut-package-change"]}
             continue
         if package in replacements:
             target = replacements[package]
             official.add(target)
             replaced.add(f"{package} -> {target}\trule replacement")
+            decisions[package] = {"decision": "replace", "reason": f"versioned replacement rule: {target}", "evidence": ["package-rule"]}
             continue
         if package in ignore or (package.startswith(ignore_prefixes) and package not in rules.get("always_keep", [])):
-            skipped.add(f"{package}\tautomatic/library dependency; ImageBuilder will resolve it")
+            if package in primary:
+                missing.add(f"{package}\texplicitly selected package matches dependency ignore rule; manual review required")
+                decisions[package] = {"decision": "review", "reason": "explicit user intent conflicts with dependency ignore rule", "evidence": ["primary-manifest", "dependency-ignore-rule"]}
+            else:
+                skipped.add(f"{package}\tpackage-manager evidence marks dependency; ImageBuilder will resolve it")
+                decisions[package] = {"decision": "skip", "reason": "explicit dependency evidence; target resolver will recalculate", "evidence": package_evidence.get(package, {}).get("evidence", [])}
             continue
         provider = thirdparty_map.get(package, {}).get("provider")
         if provider:
@@ -186,10 +238,12 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
             continue
         if status == "missing":
             missing.add(f"{package}\tmissing in target version and no provider rule matched")
+            decisions[package] = {"decision": "block", "reason": "missing in target and no replacement/provider", "evidence": ["owut-package-change"]}
             continue
         if status == "downgrade":
             reason = "downgrade blocked by never_downgrade rule" if package in never_downgrade else "downgrade requires explicit user review"
             missing.add(f"{package}\t{reason}: {details.get('from')} -> {details.get('to')}")
+            decisions[package] = {"decision": "review", "reason": reason, "evidence": ["owut-package-change"]}
             continue
         if package.startswith("kmod-") and not any(pattern.fullmatch(package) for pattern in kernel_patterns):
             skipped.add(f"{package}\told kernel module not on the functional/hardware allowlist")
@@ -218,6 +272,16 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
             thirdparty.add(f"{provider}:{package}")
         official.update(cfg.get("official_dependencies", []))
 
+    for package in sorted(installed):
+        if package not in decisions:
+            proof = package_evidence.get(package, {})
+            decisions[package] = {
+                "decision": "review",
+                "reason": "package was functionally detected but its installation reason is not authoritative",
+                "evidence": proof.get("evidence", []),
+            }
+            missing.add(f"{package}\tinstallation intent unresolved; explicit review required")
+
     official.difference_update(remove)
     official = {item for item in official if VALID_PACKAGE.fullmatch(item)}
     final_official = official | removals
@@ -228,6 +292,7 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
         "skipped": skipped,
         "replaced": replaced,
         "features": sorted(features),
+        "decisions": decisions,
     }
     out = args.output_dir
     write_lines(out / "packages-official.txt", resolved["official"])
@@ -236,6 +301,10 @@ def resolve(args: argparse.Namespace) -> dict[str, Any]:
     write_lines(out / "packages-skipped.txt", resolved["skipped"])
     write_lines(out / "packages-replaced.txt", resolved["replaced"])
     (out / "migration-report.md").write_text(render_report(analysis, resolved), encoding="utf-8")
+    (out / "package-decisions.json").write_text(
+        json.dumps(decisions, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return resolved
 
 

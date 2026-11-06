@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/1173365477/immortalwrt-imagebuilder-x86/schemas/migration-plan-v1.json",
+  "type": "object", "additionalProperties": false, "patternProperties": {"^x-[a-z0-9][a-z0-9-]*$": true},
+  "required": ["schema_version", "plan_id", "source_snapshot_id", "source_snapshot_digest", "status", "privacy_mode", "target", "strict_mode", "build_allowed", "flash_ready", "decisions", "blockers", "warnings", "errors"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"}, "plan_id": {"$ref": "#/$defs/urn"}, "source_snapshot_id": {"$ref": "#/$defs/urn"}, "source_snapshot_digest": {"$ref": "#/$defs/hex"},
+    "status": {"$ref": "#/$defs/status"}, "privacy_mode": {"enum": ["local", "redacted"]}, "strict_mode": {"type": "boolean"},
+    "build_allowed": {"type": "boolean"}, "flash_ready": {"const": false},
+    "target": {"type": "object", "additionalProperties": false, "required": ["version", "target", "profile", "architecture", "boot_mode", "image_type", "compatibility"], "properties": {
+      "version": {"type": "string", "minLength": 1}, "target": {"type": "string", "minLength": 1}, "profile": {"type": "string", "minLength": 1},
+      "architecture": {"type": "string", "minLength": 1}, "boot_mode": {"enum": ["efi", "bios", "unknown"]}, "image_type": {"type": ["string", "null"]},
+      "compatibility": {"enum": ["compatible", "incompatible", "unknown"]}
+    }},
+    "decisions": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["package", "decision", "reason", "compatible", "evidence"], "properties": {
+      "package": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+_.@-]*$"}, "decision": {"enum": ["keep", "replace", "skip", "block", "review"]},
+      "reason": {"type": "string", "minLength": 1, "maxLength": 2000}, "compatible": {"type": ["boolean", "null"]},
+      "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "maxLength": 512}}
+    }, "allOf": [
+      {"if": {"properties": {"decision": {"enum": ["block", "review"]}}}, "then": {"properties": {"compatible": {"type": "null"}}}},
+      {"if": {"properties": {"compatible": {"const": true}}}, "then": {"properties": {"decision": {"enum": ["keep", "replace", "skip"]}}}}
+    ]}},
+    "blockers": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 512},
+    "warnings": {"type": "array", "items": {"type": "string"}}, "errors": {"type": "array", "items": {"type": "string"}}
+  },
+  "allOf": [
+    {"if": {"properties": {"build_allowed": {"const": true}}}, "then": {"properties": {"status": {"const": "ok"}, "blockers": {"maxItems": 0}, "errors": {"maxItems": 0}, "target": {"properties": {"compatibility": {"const": "compatible"}}}}}},
+    {"if": {"properties": {"target": {"properties": {"compatibility": {"enum": ["unknown", "incompatible"]}}}}}, "then": {"properties": {"build_allowed": {"const": false}}}},
+    {"if": {"properties": {"status": {"enum": ["blocked", "failed"]}}}, "then": {"anyOf": [{"properties": {"blockers": {"minItems": 1}}}, {"properties": {"errors": {"minItems": 1}}}], "properties": {"build_allowed": {"const": false}}}}
+  ],
+  "$defs": {"status": {"enum": ["ok", "partial", "blocked", "failed", "unknown"]}, "hex": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "urn": {"type": "string", "pattern": "^urn:sha256:[a-f0-9]{64}$"}}
+}
