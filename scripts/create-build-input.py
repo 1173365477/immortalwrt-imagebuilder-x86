@@ -48,6 +48,9 @@ def main() -> int:
         parser.error("--output must be evidence/requests/<request-id>")
     if output.exists():
         parser.error("refusing to overwrite an existing immutable request")
+    trusted_base_path = root / "config/base-packages.txt"
+    if args.base_packages.resolve(strict=True) != trusted_base_path.resolve(strict=True):
+        parser.error("--base-packages must be the trusted repository config/base-packages.txt")
     snapshot = load_json(args.snapshot)
     plan = load_json(args.plan)
     index = load_json(args.official_index)
@@ -66,7 +69,7 @@ def main() -> int:
     shutil.copy2(args.release_capabilities, capabilities_path)
     shutil.copytree(args.files, files_path)
 
-    base = package_tokens(args.base_packages)
+    base = package_tokens(trusted_base_path)
     approved = set(base)
     for row in plan.get("decisions", []):
         if (row.get("decision") in {"keep", "replace"}
@@ -75,12 +78,20 @@ def main() -> int:
     packages_path = output / "final-packages.txt"
     packages_path.write_text("\n".join(sorted(approved)) + "\n", encoding="utf-8")
 
+    required_providers = {
+        row.get("provider") for row in plan.get("decisions", [])
+        if row.get("decision") in {"keep", "replace"} and row.get("match_type") == "third_party"
+    }
+    if None in required_providers or "" in required_providers:
+        parser.error("third-party Plan decision lacks a Provider")
     providers = []
     if args.thirdparty_status:
         status_doc = load_json(args.thirdparty_status)
         status_path = output / "thirdparty-status.json"
         shutil.copy2(args.thirdparty_status, status_path)
         for name, status in sorted(status_doc.items()):
+            if name not in required_providers:
+                continue
             if not isinstance(status, dict) or status.get("status") != "compatible":
                 continue
             apks = []
@@ -101,6 +112,8 @@ def main() -> int:
                            for row in status.get("assets", [])],
                 "apks": apks,
             })
+    if {provider["provider"] for provider in providers} != required_providers:
+        parser.error("third-party Plan Providers do not have complete compatible status evidence")
 
     policy = load_json(root / "config/apk-tools-policy.json")
     archive = Path(urlparse(plan["release"]["imagebuilder_url"]).path).name

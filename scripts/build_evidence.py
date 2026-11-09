@@ -118,6 +118,18 @@ def _package_tokens(path: Path) -> set[str]:
     return set(tokens)
 
 
+def trusted_base_packages(path: Path) -> list[str]:
+    values = [
+        line.strip() for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if len(values) != len(set(values)) or any(
+        not re.fullmatch(r"-?[A-Za-z0-9][A-Za-z0-9+_.@-]*", value) for value in values
+    ):
+        raise EvidenceError("trusted base package configuration is invalid")
+    return values
+
+
 def verify_build_input(
     input_path: Path,
     repo_root: Path,
@@ -261,6 +273,9 @@ def verify_build_input(
     packages_path = safe_path(repo_root, build["packages_path"])
     _expect_sha(packages_path, build["packages_sha256"], "package list")
     actual_packages = _package_tokens(packages_path)
+    trusted_base = trusted_base_packages(repo_root / "config/base-packages.txt")
+    if build["base_packages"] != trusted_base:
+        raise EvidenceError("build base_packages differ from the trusted versioned baseline")
     approved_packages = _decision_packages(plan) | set(build["base_packages"])
     if actual_packages != approved_packages:
         raise EvidenceError("frozen package list differs from approved plan decisions and baseline")
@@ -275,6 +290,26 @@ def verify_build_input(
         raise EvidenceError("frozen files tree digest mismatch")
 
     providers = build_input["thirdparty"]
+    required_thirdparty: dict[str, set[str]] = {}
+    required_evidence: dict[str, set[str]] = {}
+    for decision in plan.get("decisions", []):
+        if decision.get("decision") not in {"keep", "replace"} or decision.get("match_type") != "third_party":
+            continue
+        provider_name = decision.get("provider")
+        package_name = decision.get("target_package") or decision.get("package")
+        if not isinstance(provider_name, str) or not provider_name or not isinstance(package_name, str):
+            raise EvidenceError("third-party keep/replace decision lacks provider or target package")
+        required_thirdparty.setdefault(provider_name, set()).add(package_name)
+        required_evidence.setdefault(provider_name, set()).update(
+            evidence.removeprefix("thirdparty-evidence:")
+            for evidence in decision.get("evidence", [])
+            if isinstance(evidence, str) and evidence.startswith("thirdparty-evidence:")
+        )
+    declared_provider_names = [provider.get("provider") for provider in providers]
+    if len(declared_provider_names) != len(set(declared_provider_names)):
+        raise EvidenceError("duplicate third-party Provider declarations")
+    if set(declared_provider_names) != set(required_thirdparty):
+        raise EvidenceError("Migration Plan third-party Providers do not exactly match Build Input")
     try:
         rules = yaml.safe_load((repo_root / "config/thirdparty.yml").read_text(encoding="utf-8"))["providers"]
     except (OSError, KeyError, TypeError, yaml.YAMLError) as exc:
@@ -306,15 +341,19 @@ def verify_build_input(
         status_digest = status_payload.pop("evidence_digest", None)
         if status_digest != provider["evidence_digest"] or canonical_digest(status_payload) != status_digest:
             raise EvidenceError(f"third-party evidence digest mismatch: {provider['provider']}")
+        if required_evidence[provider["provider"]] != {provider["evidence_digest"]}:
+            raise EvidenceError(f"Migration Plan third-party evidence is not bound: {provider['provider']}")
         bound = status.get("target", {})
         if (bound.get("version"), bound.get("architecture"), bound.get("package_manager")) != (
             target["version"], target["architecture"], target["package_manager"]
         ):
             raise EvidenceError(f"third-party target binding mismatch: {provider['provider']}")
+        provider_apk_packages: set[str] = set()
         for apk in provider["apks"]:
             apk_path = safe_path(repo_root, apk["path"])
             _expect_sha(apk_path, apk["sha256"], "third-party APK")
             declared_apks.add(apk_path.relative_to(repo_root).as_posix())
+            provider_apk_packages.add(apk["package"])
             checks = status.get("apk_checks", [])
             match = next((row for row in checks if row.get("file") == apk["status_file"]), None)
             if not match or match.get("metadata_status") != "verified":
@@ -327,6 +366,11 @@ def verify_build_input(
                 raise EvidenceError(f"third-party APK dependency binding mismatch: {apk['path']}")
             if apk["architecture"] not in {"all", "noarch", target["architecture"]}:
                 raise EvidenceError(f"third-party APK architecture mismatch: {apk['path']}")
+        missing_plan_packages = required_thirdparty[provider["provider"]] - provider_apk_packages
+        if missing_plan_packages:
+            raise EvidenceError(
+                f"Migration Plan third-party package has no bound APK: {sorted(missing_plan_packages)[0]}"
+            )
         frozen_assets = {
             (asset.get("asset_id"), asset.get("asset"), asset.get("url"), asset.get("sha256"))
             for asset in status.get("assets", []) if isinstance(asset, dict)
