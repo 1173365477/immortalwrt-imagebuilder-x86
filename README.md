@@ -18,7 +18,7 @@
 
 T13 起，Build workflow 不再现场解析 `latest`、旧报告或第三方 Release。分析阶段必须先冻结精确 Release、Snapshot、Migration Plan、官方索引、第三方资产/APK 摘要、包清单、files 树和受信任构建代码 Commit，生成 `build-input-v1.json`。Build 仅接受仓库内 `evidence/requests/<request-id>`，逐项复核后才调用 ImageBuilder。
 
-旧 `workflow_dispatch` 参数仍保留，便于已有调用方识别迁移错误，但它们单独出现时只会明确停止并提示先运行分析流程。`strict_mode=false`、`latest`、旧 `system-analysis.json`、任意 URL 或可变 Git ref 均不能授权构建。完整协议见 [T13 immutable build protocol](docs/t13-immutable-build.md)。
+旧 `workflow_dispatch` 参数因 GitHub 单工作流 10 输入上限，原样保留在 **Legacy build request compatibility** 只读入口；该入口只会明确停止并提示先运行分析流程。`strict_mode=false`、`latest`、旧 `system-analysis.json`、任意 URL 或可变 Git ref 均不能授权构建。完整协议见 [T13 immutable build protocol](docs/t13-immutable-build.md)。
 
 ## 工作流
 

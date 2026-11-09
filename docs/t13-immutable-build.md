@@ -60,7 +60,10 @@ with `request_id`, the exact `snapshot_ref`, and frozen `target_version`.
 
 ## Gate and TOCTOU controls
 
-The workflow has `contents: read`, checks out exactly `github.sha` without
+GitHub limits a dispatch form to 10 inputs, so the original nine inputs remain
+unchanged in `build-legacy.yml`; that compatibility entry is read-only guidance
+and has no checkout, verifier, network or ImageBuilder step. The T13 workflow
+has `contents: read`, checks out exactly `github.sha` without
 persisted credentials, rejects legacy-only requests and disables Release
 publishing. `verify-build-input.py` validates every identity, digest and safety
 binding. Package and files inputs are copied into a private temporary stage and

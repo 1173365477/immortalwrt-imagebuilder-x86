@@ -20,8 +20,9 @@ def test_build_version_is_taken_from_dispatch_input_not_self_reference():
 def test_existing_build_inputs_and_artifact_names_remain_compatible():
     data = workflow("build.yml")
     inputs = data[True]["workflow_dispatch"]["inputs"]
+    legacy_inputs = workflow("build-legacy.yml")[True]["workflow_dispatch"]["inputs"]
     for name in ("immortalwrt_version", "report_path", "include_openclash", "openclash_version", "include_nikki", "include_lucky", "rootfs_size", "create_release", "strict_mode"):
-        assert name in inputs
+        assert name in legacy_inputs
     for name in ("request_id", "snapshot_ref", "target_version"):
         assert name in inputs
     text = (ROOT / ".github/workflows/build.yml").read_text()
@@ -29,6 +30,9 @@ def test_existing_build_inputs_and_artifact_names_remain_compatible():
     assert "Legacy reports must first use analyze.yml" in text
     assert "permissions:\n  contents: read" in text
     assert "gh release create" not in text
+    legacy_text = (ROOT / ".github/workflows/build-legacy.yml").read_text()
+    assert "cannot authorize ImageBuilder" in legacy_text
+    assert "make image" not in legacy_text
 
 
 def test_ci_runs_actionlint_and_all_scanner_shellcheck_targets():

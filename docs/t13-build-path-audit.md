@@ -24,9 +24,10 @@ recheck → make image → generate-build-provenance.py (same verifier) → arti
 safety → upload`
 
 There is one supported `make image` call and it follows the shared verifier.
-Legacy dispatch fields remain visible but are never passed into analysis,
-resolution, Provider selection or ImageBuilder. `create_release=true` is
-rejected and the workflow has only `contents: read`.
+Legacy dispatch fields remain visible in a separate read-only compatibility
+entry (required by GitHub's 10-input limit) but are never passed into analysis,
+resolution, Provider selection or ImageBuilder. Release publishing is absent
+and both workflows have only `contents: read`.
 
 ## Threat decisions
 

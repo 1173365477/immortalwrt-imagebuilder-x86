@@ -15,48 +15,8 @@ on:
         description: Frozen target version (must match build-input-v1.json)
         required: false
         type: string
-      immortalwrt_version:
-        description: Legacy analysis input; retained but never authorizes a build
-        required: false
-        default: latest
-        type: string
-      report_path:
-        description: Legacy analysis input; use analyze.yml to create immutable evidence
-        required: false
-        default: reports/current-system.txt
-        type: string
-      include_openclash:
-        description: Legacy analysis input
-        required: false
-        default: true
-        type: boolean
-      openclash_version:
-        description: Legacy analysis input
-        required: false
-        default: 0.48.002
-        type: string
-      include_nikki:
-        description: Legacy analysis input
-        required: false
-        default: true
-        type: boolean
-      include_lucky:
-        description: Legacy analysis input
-        required: false
-        default: true
-        type: boolean
-      rootfs_size:
-        description: Legacy input; immutable value comes from build-input-v1.json
-        required: false
-        default: "8192"
-        type: string
-      create_release:
-        description: Deprecated and rejected by T13 least-privilege workflow
-        required: false
-        default: false
-        type: boolean
       strict_mode:
-        description: Legacy analysis input; false never bypasses the immutable build gate
+        description: Analysis compatibility flag; false never bypasses the immutable build gate
         required: false
         default: true
         type: boolean
@@ -97,7 +57,6 @@ jobs:
           REQUEST_ID: ${{ inputs.request_id }}
           SNAPSHOT_REF: ${{ inputs.snapshot_ref }}
           TARGET_VERSION: ${{ inputs.target_version }}
-          CREATE_RELEASE: ${{ inputs.create_release }}
         run: |
           set -euo pipefail
           [[ -n "$REQUEST_ID" && "$REQUEST_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || {
@@ -107,9 +66,6 @@ jobs:
             echo "::error::snapshot_ref must be the immutable repository path for request_id."; exit 2;
           }
           [[ -n "$TARGET_VERSION" ]] || { echo "::error::target_version is required."; exit 2; }
-          [[ "$CREATE_RELEASE" != "true" ]] || {
-            echo "::error::create_release is disabled in T13; this workflow has read-only permissions."; exit 2;
-          }
           [[ -f "$SNAPSHOT_REF/build-input-v1.json" ]] || {
             echo "::error::Missing frozen build-input-v1.json."; exit 2;
           }
