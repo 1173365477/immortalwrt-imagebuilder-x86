@@ -3,5 +3,7 @@
   "alpine_release": "3.22.8",
   "apk_tools_version": "2.14.12",
   "rootfs_url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.8-x86_64.tar.gz",
-  "rootfs_sha256": "2d7f46af9b7e86ad64ebeba3fe9b75b62dd5b259e708afb2ab21268f627696e5"
+  "rootfs_sha256": "2d7f46af9b7e86ad64ebeba3fe9b75b62dd5b259e708afb2ab21268f627696e5",
+  "metadata_test_apk": "apk-tools-2.14.12-r0.apk",
+  "metadata_test_apk_sha256": "fdf8a327219e1e6e5d4e45fbd7db7cf4881fe3e641e831e58caa72e83a1acace"
 }
