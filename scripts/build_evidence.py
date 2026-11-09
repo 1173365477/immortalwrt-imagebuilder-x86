@@ -244,6 +244,10 @@ def verify_build_input(
     )
     if capability_binding != input_binding:
         raise EvidenceError("release capabilities do not bind the requested target")
+    if (capabilities.get("profiles_sha256") != release["profiles_sha256"]
+            or capabilities.get("package_index_sources") != release["package_index_sources"]
+            or capabilities.get("imagebuilder_filename") != release["imagebuilder_filename"]):
+        raise EvidenceError("release capability source or ImageBuilder identity mismatch")
     official_path = safe_path(repo_root, release["official_index_path"])
     _expect_sha(official_path, release["official_index_file_sha256"], "official package index")
     official_index = load_json(official_path)
