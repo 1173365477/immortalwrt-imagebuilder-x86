@@ -32,6 +32,7 @@ def frozen_request(tmp_path: Path) -> tuple[Path, dict]:
         shutil.copy2(ROOT / "schemas" / name, repo / "schemas" / name)
     shutil.copy2(ROOT / "config/thirdparty.yml", repo / "config/thirdparty.yml")
     shutil.copy2(ROOT / "config/apk-tools-policy.json", repo / "config/apk-tools-policy.json")
+    (repo / "config/base-packages.txt").write_text("# fixture baseline is intentionally empty\n")
     request = repo / "evidence/requests/request-1"
     request.mkdir(parents=True)
     snapshot = json.loads((ROOT / "tests/fixtures/system-snapshot-sprint2a.json").read_text())
@@ -151,6 +152,7 @@ def add_openclash_provider(path: Path, value: dict) -> None:
                                         "index_digest": value["release"]["official_index_digest"]},
               "warnings": []}
     status["evidence_digest"] = canonical_digest(status)
+    add_plan_thirdparty_keep(path, value, status["evidence_digest"])
     status_path = request / "thirdparty-status.json"
     write_json(status_path, {"openclash": status})
     value["thirdparty"] = [{
@@ -167,6 +169,54 @@ def add_openclash_provider(path: Path, value: dict) -> None:
     value["build"]["files_digest"] = tree_digest(request / "files")
     value["build"]["config_digest"] = canonical_digest(value["build"], ("config_digest",))
     rewrite_input(path, value)
+
+
+def add_plan_thirdparty_keep(path: Path, value: dict, evidence_digest: str) -> None:
+    repo = path.parents[3]
+    plan_path = repo / value["migration_plan"]["path"]
+    plan = json.loads(plan_path.read_text())
+    plan["decisions"].append({
+        "package": "luci-app-openclash", "source_version": "0.48.002",
+        "origin": "third_party", "install_reason": "manual", "decision": "keep",
+        "target_package": "luci-app-openclash", "match_type": "third_party",
+        "provider": "openclash", "reason": "trusted fixture decision", "compatible": True,
+        "dependencies": ["curl"], "replacements": [], "conflicts": [],
+        "evidence": [f"thirdparty-evidence:{evidence_digest}"],
+    })
+    plan["package_summary"]["installed"] += 1
+    plan["package_summary"]["keep"] += 1
+    plan["digest"] = ""
+    plan["plan_id"] = ""
+    plan["digest"] = canonical_digest(plan, ("plan_id", "digest"))
+    plan["plan_id"] = f"urn:sha256:{plan['digest']}"
+    write_json(plan_path, plan)
+    value["migration_plan"].update(
+        plan_id=plan["plan_id"], plan_digest=plan["digest"], file_sha256=sha256_file(plan_path)
+    )
+
+
+def assert_build_entry_blocks_before_effects(path: Path, repo: Path, tmp_path: Path) -> None:
+    scripts = repo / "scripts"
+    scripts.mkdir(exist_ok=True)
+    for name in ("build-image.sh", "verify-build-input.py", "build_evidence.py"):
+        shutil.copy2(ROOT / "scripts" / name, scripts / name)
+    (scripts / "build-image.sh").chmod(0o755)
+    (scripts / "verify-build-input.py").chmod(0o755)
+    fake_bin = tmp_path / "gate-bin"
+    fake_bin.mkdir(exist_ok=True)
+    marker = tmp_path / "external-effect-called"
+    for command in ("curl", "make"):
+        tool = fake_bin / command
+        tool.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 99\n")
+        tool.chmod(0o755)
+    env = os.environ | {
+        "BUILD_INPUT": str(path), "TRUSTED_REPOSITORY": REPOSITORY,
+        "TRUSTED_COMMIT": COMMIT, "PATH": f"{fake_bin}:{os.environ['PATH']}",
+    }
+    result = subprocess.run(["bash", str(scripts / "build-image.sh")], cwd=repo, env=env,
+                            text=True, capture_output=True)
+    assert result.returncode != 0
+    assert not marker.exists(), result.stdout + result.stderr
 
 
 def test_build_input_positive_stages_exact_bytes(tmp_path):
@@ -205,9 +255,63 @@ def test_self_consistent_provider_status_cannot_hide_missing_official_dependency
     write_json(status_path, document)
     value["thirdparty"][0]["evidence_digest"] = status["evidence_digest"]
     rewrite_input(path, value)
-    with pytest.raises(EvidenceError, match="official dependency evidence"):
+    with pytest.raises(EvidenceError, match="third-party evidence is not bound"):
         verify_build_input(path, tmp_path / "repo", expected_repository=REPOSITORY,
                            expected_commit=COMMIT, revalidate_upstream=False)
+
+
+def test_plan_thirdparty_keep_cannot_omit_provider_or_apk_from_build(tmp_path):
+    path, value = frozen_request(tmp_path)
+    add_plan_thirdparty_keep(path, value, "a" * 64)
+    rewrite_input(path, value)
+    repo = tmp_path / "repo"
+    with pytest.raises(EvidenceError, match="Providers do not exactly match"):
+        verify_build_input(path, repo, expected_repository=REPOSITORY,
+                           expected_commit=COMMIT, revalidate_upstream=False)
+    assert_build_entry_blocks_before_effects(path, repo, tmp_path)
+
+
+def test_self_consistent_extra_base_package_is_not_trusted(tmp_path):
+    path, value = frozen_request(tmp_path)
+    repo = tmp_path / "repo"
+    index_path = repo / value["release"]["official_index_path"]
+    index = json.loads(index_path.read_text())
+    index["nano"] = {"version": "8.0"}
+    write_json(index_path, index)
+    index_digest = canonical_digest(index)
+    capabilities_path = repo / value["release"]["capabilities_path"]
+    capabilities = json.loads(capabilities_path.read_text())
+    capabilities["official_index_digest"] = index_digest
+    capabilities.pop("resolution_digest")
+    capabilities["resolution_digest"] = canonical_digest(capabilities)
+    write_json(capabilities_path, capabilities)
+    plan_path = repo / value["migration_plan"]["path"]
+    plan = json.loads(plan_path.read_text())
+    plan["release"]["official_index_digest"] = index_digest
+    plan["release"]["resolution_digest"] = capabilities["resolution_digest"]
+    plan["digest"] = ""
+    plan["plan_id"] = ""
+    plan["digest"] = canonical_digest(plan, ("plan_id", "digest"))
+    plan["plan_id"] = f"urn:sha256:{plan['digest']}"
+    write_json(plan_path, plan)
+    packages_path = repo / value["build"]["packages_path"]
+    packages_path.write_text("curl\nnano\n")
+    value["migration_plan"].update(
+        plan_id=plan["plan_id"], plan_digest=plan["digest"], file_sha256=sha256_file(plan_path)
+    )
+    value["release"].update(
+        resolution_digest=capabilities["resolution_digest"], official_index_digest=index_digest,
+        official_index_file_sha256=sha256_file(index_path),
+        capabilities_file_sha256=sha256_file(capabilities_path),
+    )
+    value["build"]["base_packages"] = ["nano"]
+    value["build"]["packages_sha256"] = sha256_file(packages_path)
+    value["build"]["config_digest"] = canonical_digest(value["build"], ("config_digest",))
+    rewrite_input(path, value)
+    with pytest.raises(EvidenceError, match="trusted versioned baseline"):
+        verify_build_input(path, repo, expected_repository=REPOSITORY,
+                           expected_commit=COMMIT, revalidate_upstream=False)
+    assert_build_entry_blocks_before_effects(path, repo, tmp_path)
 
 
 @pytest.mark.parametrize("mutation", [
@@ -290,8 +394,7 @@ def test_verifier_cli_and_provenance_use_actual_artifact_bytes(tmp_path):
 def test_create_build_input_cli_produces_verifiable_request(tmp_path):
     source_input, source = frozen_request(tmp_path)
     repo = tmp_path / "repo"
-    base = repo / "config/empty-base.txt"
-    base.write_text("# intentionally empty\n")
+    base = repo / "config/base-packages.txt"
     source_dir = source_input.parent
     output = repo / "evidence/requests/request-2"
     result = subprocess.run([
@@ -332,7 +435,25 @@ def test_invalid_input_never_reaches_network_or_make(tmp_path):
     assert not marker.exists()
 
 
-def test_real_apk_tools_version_comparison_when_configured():
+def test_apk_chroot_wrapper_rejects_commands_and_files_outside_allowlist(tmp_path):
+    root = tmp_path / "root"
+    (root / "host-apk").mkdir(parents=True)
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside.apk"
+    outside.write_bytes(b"ADBoutside")
+    env = os.environ | {"APK_CHROOT_ROOT": str(root), "APK_CHROOT_ALLOWED_ROOTS": str(allowed)}
+    wrapper = ROOT / "scripts/apk-chroot-wrapper.sh"
+    unsupported = subprocess.run([str(wrapper), "add", "package.apk"], env=env,
+                                 text=True, capture_output=True)
+    assert unsupported.returncode != 0
+    denied = subprocess.run([str(wrapper), "adbdump", "--format", "json", str(outside)],
+                            env=env, text=True, capture_output=True)
+    assert denied.returncode != 0
+    assert "outside allowed roots" in denied.stderr
+
+
+def test_real_apk_tools_version_comparison_when_configured(monkeypatch):
     apk = os.environ.get("APK_REAL_BINARY")
     if not apk:
         pytest.skip("CI provides the pinned real apk-tools wrapper")
@@ -344,3 +465,17 @@ def test_real_apk_tools_version_comparison_when_configured():
         assert result.stdout.strip() == expected
     invalid = subprocess.run([apk, "version", "-t", "3.0"], text=True, capture_output=True)
     assert invalid.returncode != 0
+    package = os.environ.get("APK_REAL_PACKAGE")
+    assert package, "CI must provide a legal pinned APK for real metadata inspection"
+    monkeypatch.setenv("PATH", f"{Path(apk).parent}:{os.environ['PATH']}")
+    spec = importlib.util.spec_from_file_location("real_apk_fetch", ROOT / "scripts/fetch-thirdparty.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    metadata, warning = module.inspect_apk_metadata(Path(package))
+    assert warning is None
+    assert metadata is not None
+    assert metadata["name"] == "apk-tools"
+    assert metadata["arch"] == "x86_64"
+    assert metadata["version"] == "2.14.12-r0"
+    assert isinstance(metadata["dependencies"], list) and metadata["dependencies"]

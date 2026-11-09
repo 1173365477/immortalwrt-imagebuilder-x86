@@ -58,3 +58,54 @@ PASS. There is no unresolved T13 HIGH blocker in the worker validation.
 
 Worker conclusion: **READY FOR INDEPENDENT REVIEW**. Keep the PR Draft until an
 independent reviewer accepts the final HEAD. Do not merge or close Issue #15.
+
+## Independent review remediation
+
+Review baseline: `8c37669873a5684ad221b35fee0777fd727a7f3f`.
+
+### A — chroot APK metadata access
+
+Confirmed. The original wrapper forwarded a host absolute path unchanged to
+`chroot`, where that path does not exist. The Linux integration test records
+`Original unmapped chroot path correctly failed`. A restricted wrapper now
+copies only a regular, non-symlink, size-limited APK from configured roots into
+a private chroot ingress, permits only version comparison and JSON `adbdump`,
+and cleans the ingress. The same test verifies SHA-256 of the legal
+`apk-tools-2.14.12-r0.apk` and requires `inspect_apk_metadata()` to obtain its
+name, x86_64 architecture, version and non-empty dependency list.
+
+### B — third-party Provider completeness
+
+Confirmed. A canonical, schema-valid Plan with a third-party OpenClash `keep`,
+an empty Build Input Provider list and no bundled APK returned:
+
+```text
+ORIGINAL RESULT: ACCEPTED 2c0380d735d7d889cf910dbadac407bbf57c0613e1649ed97b7e7fdeb339e5f2
+thirdparty declarations: 0
+bundled APKs: []
+```
+
+The gate now requires exact Plan/Build-Input Provider-set equality, exact Plan
+evidence-digest binding, a bound APK for every retained third-party target
+package, and exact declared/bundled APK-byte equality. The negative test also
+invokes the real `build-image.sh` entry and proves neither curl nor make runs.
+
+### C — trusted base packages
+
+Confirmed. Adding official-index package `nano`, declaring it in
+`build.base_packages`, and recomputing every affected digest returned:
+
+```text
+ORIGINAL RESULT: ACCEPTED ee2995ed46b8d1708c8724f0cdc69cea385838382334c0192add06b905a5b8cb
+untrusted base_packages: ['nano']
+```
+
+The verifier now requires exact ordered equality with the protected,
+version-controlled `config/base-packages.txt`. The request creator refuses an
+alternate base-package file. The negative test passes self-consistent modified
+index, capabilities, Plan, package-list, config and Build Input digests through
+the real build entry and proves the gate stops before network or make.
+
+Post-remediation focused local result: 42 passed, 1 real-apk CI test skipped.
+The full Linux count and final CI links are recorded after the final remote HEAD
+completes both Push and PR workflows.

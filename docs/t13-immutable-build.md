@@ -84,6 +84,25 @@ The pinned comparator is apk-tools 2.14.12 from Alpine 3.22.8. CI verifies the
 official minirootfs SHA-256 and executes real `apk version -t` cases. A Build
 Input with another comparator version is rejected.
 
+The apk-tools process runs in that pinned Alpine chroot. Host paths are not
+visible inside a chroot, so `apk-chroot-wrapper.sh` accepts only the two version
+commands and JSON `adbdump`. For `adbdump`, it resolves a regular non-symlink
+APK under an explicit allowed root, enforces a 512 MiB limit, copies it into a
+per-call mode-0700 ingress directory, makes the copy read-only and passes only
+the chroot-local path to apk. The ingress is deleted after inspection. CI first
+proves the original unmapped host path fails, then inspects a checksum-pinned
+legal Alpine APK through this mapping. Production revalidation also fixes
+`TMPDIR` to a dedicated runner directory and permits only that directory plus
+the checked-out immutable evidence tree; it does not expose general host paths.
+
+The verifier also enforces bidirectional package completeness. Every Migration
+Plan third-party keep/replace decision must name exactly one declared Provider,
+bind that Provider evidence digest, and have its target package among the
+actual frozen APKs. Extra Providers, missing Providers/APKs and orphan bundled
+APKs fail. `build.base_packages` must exactly equal the reviewed
+`config/base-packages.txt`; being present in the official index is not authority
+to extend the baseline.
+
 ## Provenance and safety states
 
 After the expected image exists, `generate-build-provenance.py` re-runs the

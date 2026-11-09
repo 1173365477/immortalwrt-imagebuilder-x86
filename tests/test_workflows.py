@@ -39,6 +39,9 @@ def test_ci_runs_actionlint_and_all_scanner_shellcheck_targets():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     assert "actionlint" in text
     assert "scripts/smart-upgrade-agent.sh scripts/smart-upgrade-storage.sh" in text
+    assert "scripts/apk-chroot-wrapper.sh" in text
+    assert "apk adbdump --format json" in text
+    assert "Original unmapped chroot path correctly failed" in text
 
 
 def test_artifact_uploads_require_successful_safety_gate():
@@ -60,6 +63,8 @@ def test_build_workflow_has_no_strict_mode_or_legacy_build_bypass():
     assert "scripts/build-image.sh" in text
     assert "--offline-recheck" in text
     assert "--offline-recheck" not in (ROOT / "scripts/build-image.sh").read_text()
+    assert "scripts/apk-chroot-wrapper.sh" in text
+    assert "printf '#!/usr/bin/env bash" not in text
     assert "STRICT_MODE" not in text
     assert "validate-manifest.py" not in text
     assert "fetch-thirdparty.py" not in text
