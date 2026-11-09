@@ -40,6 +40,16 @@ the complete required asset set. Every re-downloaded APK is parsed again, and
 its package name, architecture, version and dependencies must match both the
 provider rule and the recorded evidence.
 
+APK dependency constraints are preserved end to end. For the supported exact
+and relational operators (`=`, `<`, `<=`, `>`, `>=`), the Migration Plan asks
+the target `apk` implementation to compare the frozen-index candidate version
+with the required version. Package-name presence alone is not sufficient.
+Missing candidate versions, an unavailable comparator, invalid comparison
+output, conflicts, fuzzy constraints (`~`, `<~`, `>~`) and other expressions
+not implemented by this Sprint 2A gate are unresolved and block the build.
+This intentionally conservative boundary does not claim a general solver or
+OPKG-to-APK migration.
+
 Unknown providers, missing assets, wrong architecture/package manager,
 untrusted URLs, absent digests, missing official dependencies, ambiguous
 matches, unsafe archives and malformed APKs resolve to `unresolved` or

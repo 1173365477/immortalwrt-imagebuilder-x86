@@ -4,9 +4,14 @@ import importlib.util
 import hashlib
 import json
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
+import pytest
+import yaml
 from jsonschema import Draft202012Validator
 
+import migration_plan as migration_plan_module
 from migration_plan import canonical_digest, generate_plan, write_legacy_outputs
 
 
@@ -18,6 +23,12 @@ FETCH_SPEC = importlib.util.spec_from_file_location(
 assert FETCH_SPEC and FETCH_SPEC.loader
 FETCH = importlib.util.module_from_spec(FETCH_SPEC)
 FETCH_SPEC.loader.exec_module(FETCH)
+CLI_SPEC = importlib.util.spec_from_file_location(
+    "generate_migration_plan_cli", ROOT / "scripts/generate-migration-plan.py"
+)
+assert CLI_SPEC and CLI_SPEC.loader
+CLI = importlib.util.module_from_spec(CLI_SPEC)
+CLI_SPEC.loader.exec_module(CLI)
 
 
 def snapshot():
@@ -249,6 +260,131 @@ def test_verified_apk_metadata_with_unresolved_dependency_blocks_build():
     row = next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")
     assert row["decision"] == "block"
     assert "target index" in row["reason"]
+
+
+@pytest.mark.parametrize(("index_entry", "dependency", "comparison", "allowed", "reason"), [
+    ({"version": "2.0"}, "libexample>=3.0", "<", False, "not satisfied"),
+    ({"version": "3.0"}, "libexample>=3.0", "=", True, None),
+    ({"version": "3.1-r0"}, "libexample>=3.0", ">", True, None),
+    ({}, "libexample>=3.0", None, False, "lacks a target version"),
+    ({"version": "3.0"}, "libexample~3.0", None, False, "unsupported"),
+])
+def test_apk_dependency_constraints_use_target_version_semantics(
+    monkeypatch, index_entry, dependency, comparison, allowed, reason
+):
+    data = snapshot()
+    data["packages"]["installed"][-1].update(name="luci-app-openclash", origin="third_party")
+    data["packages"]["top_level"] = ["luci-app-openclash"]
+    index = {**official_index(), "libexample": index_entry}
+    capabilities = target(index)
+    statuses = trusted_status(capabilities, index)
+    status = statuses["openclash"]
+    status["apk_checks"][0]["dependencies"] = [dependency]
+    status["evidence_digest"] = canonical_digest({
+        key: value for key, value in status.items() if key != "evidence_digest"
+    })
+    monkeypatch.setattr(
+        migration_plan_module, "_apk_version_compare",
+        lambda candidate, required: comparison,
+    )
+    plan = generate_plan(
+        data, capabilities, index, rules(), statuses,
+        thirdparty_files={"openclash/luci-app-openclash-0.48.002.apk": HEX},
+        trusted_thirdparty_evidence={status["evidence_digest"]},
+    )
+    row = next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")
+    assert plan["build_allowed"] is allowed
+    assert row["decision"] == ("keep" if allowed else "block")
+    if reason:
+        assert reason in row["reason"]
+
+
+def test_versioned_apk_dependency_blocks_when_apk_comparator_is_unavailable(monkeypatch):
+    monkeypatch.setattr(migration_plan_module.shutil, "which", lambda name: None)
+    assert migration_plan_module._apk_dependency_result(
+        "libexample>=3.0", {"libexample": {"version": "3.1"}}, {}
+    ) == (False, "APK dependency libexample>=3.0 could not be compared with apk-tools")
+
+
+def test_apk_version_comparison_delegates_to_target_package_manager(monkeypatch):
+    observed = {}
+    monkeypatch.setattr(migration_plan_module.shutil, "which", lambda name: "/usr/bin/apk")
+
+    def run(command, **kwargs):
+        observed["command"] = command
+        return SimpleNamespace(returncode=0, stdout="<\n", stderr="")
+
+    monkeypatch.setattr(migration_plan_module.subprocess, "run", run)
+    assert migration_plan_module._apk_version_compare("2.0", "3.0") == "<"
+    assert observed["command"] == ["/usr/bin/apk", "version", "-t", "2.0", "3.0"]
+
+
+def test_generate_migration_plan_cli_blocks_unsatisfied_apk_constraint(monkeypatch, tmp_path):
+    data = snapshot()
+    data["packages"]["installed"][-1].update(name="luci-app-openclash", origin="third_party")
+    data["packages"]["top_level"] = ["luci-app-openclash"]
+    index = {**official_index(), "libexample": {"version": "2.0"}}
+    capabilities = target(index)
+    provider_rules = rules()
+    statuses = trusted_status(capabilities, index)
+    status = statuses["openclash"]
+    status["apk_checks"][0]["dependencies"] = ["libexample>=3.0"]
+
+    thirdparty_dir = tmp_path / "thirdparty"
+    package_path = thirdparty_dir / "openclash/luci-app-openclash-0.48.002.apk"
+    package_path.parent.mkdir(parents=True)
+    package_path.write_bytes(b"ADB0cli-fixture")
+    digest = hashlib.sha256(package_path.read_bytes()).hexdigest()
+    status["apk_checks"][0]["sha256"] = digest
+    status["evidence_digest"] = canonical_digest({
+        key: value for key, value in status.items() if key != "evidence_digest"
+    })
+
+    paths = {
+        "snapshot": tmp_path / "snapshot.json",
+        "capabilities": tmp_path / "capabilities.json",
+        "index": tmp_path / "index.json",
+        "rules": tmp_path / "thirdparty.yml",
+        "status": tmp_path / "status.json",
+        "output": tmp_path / "output",
+    }
+    paths["snapshot"].write_text(json.dumps(data))
+    paths["capabilities"].write_text(json.dumps(capabilities))
+    paths["index"].write_text(json.dumps(index))
+    paths["rules"].write_text(yaml.safe_dump(provider_rules))
+    paths["status"].write_text(json.dumps(statuses))
+
+    class FakeVerifier:
+        class ProviderError(Exception):
+            reason = "synthetic verifier error"
+
+        @staticmethod
+        def template_values(*_args):
+            return {}
+
+        @staticmethod
+        def revalidate_status_provenance(*_args):
+            return status["evidence_digest"]
+
+    monkeypatch.setattr(CLI, "load_evidence_verifier", lambda _root: FakeVerifier)
+    monkeypatch.setattr(migration_plan_module, "_apk_version_compare", lambda candidate, required: "<")
+    monkeypatch.setattr(sys, "argv", [
+        "generate-migration-plan.py",
+        "--snapshot", str(paths["snapshot"]),
+        "--capabilities", str(paths["capabilities"]),
+        "--official-index", str(paths["index"]),
+        "--thirdparty-rules", str(paths["rules"]),
+        "--thirdparty-status", str(paths["status"]),
+        "--thirdparty-dir", str(thirdparty_dir),
+        "--output-dir", str(paths["output"]),
+        "--strict",
+    ])
+    assert CLI.main() == 1
+    plan = json.loads((paths["output"] / "migration-plan-v1.json").read_text())
+    assert plan["build_allowed"] is False
+    assert plan["flash_ready"] is False
+    row = next(row for row in plan["decisions"] if row["package"] == "luci-app-openclash")
+    assert "not satisfied by target version 2.0" in row["reason"]
 
 
 def test_self_consistent_status_and_local_apk_without_trusted_provenance_cannot_bypass_gate():

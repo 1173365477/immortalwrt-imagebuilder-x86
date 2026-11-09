@@ -257,21 +257,88 @@ def match_assets(
     return matches
 
 
+APK_MATCH_OPERATORS = {
+    1: "=", 2: "<", 3: "<=", 4: ">", 5: ">=", 7: "",
+    8: "~", 9: "~", 11: "<~", 13: ">~",
+}
+
+
+def _normalize_adb_dependency(value: Any) -> str:
+    if isinstance(value, str) and value:
+        return value
+    if not isinstance(value, dict):
+        raise ValueError("dependency entry is not a string or object")
+    name = value.get("name")
+    version = value.get("version")
+    # apk-tools omits match for its two defaults: ANY without a version and
+    # EQUAL when a version is present.
+    match = value.get("match", 7 if version is None else 1)
+    if not isinstance(name, str) or not name:
+        raise ValueError("dependency name is missing")
+    if isinstance(match, str):
+        operator = match
+    elif isinstance(match, int) and not match & 16:
+        operator = APK_MATCH_OPERATORS.get(match)
+    else:
+        operator = None
+    if operator is None or operator not in {"", "=", "<", "<=", ">", ">=", "~", "<~", ">~"}:
+        raise ValueError("dependency match operator is unsupported or conflicting")
+    if not operator:
+        if version not in {None, ""}:
+            raise ValueError("unconstrained dependency unexpectedly contains a version")
+        return name
+    if not isinstance(version, str) or not version:
+        raise ValueError("dependency version is missing")
+    return f"{name}{operator}{version}"
+
+
+def _find_adb_package_info(value: Any) -> dict[str, Any] | None:
+    matches: list[dict[str, Any]] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            if all(key in node for key in ("name", "arch", "version")):
+                matches.append(node)
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+
+    visit(value)
+    return matches[0] if len(matches) == 1 else None
+
+
 def inspect_apk_metadata(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     apk = shutil.which("apk")
     if not apk:
         return None, "APK metadata inspection tool is unavailable"
-    process = subprocess.run(
-        [apk, "adbdump", str(path)], capture_output=True, text=True, check=False, timeout=30
-    )
+    try:
+        process = subprocess.run(
+            [apk, "adbdump", "--format", "json", str(path)],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"APK metadata inspection failed: {exc}"
     if process.returncode != 0:
         return None, "APK metadata inspection failed for this APK format"
-    metadata: dict[str, Any] = {"raw_summary": process.stdout[:2000]}
-    for key in ("name", "arch", "version"):
-        match = re.search(rf"(?mi)^\s*{key}\s*[:=]\s*(\S+)", process.stdout)
-        if match:
-            metadata[key] = match.group(1)
-    metadata["dependencies"] = re.findall(r"(?mi)^\s*(?:depend|depends)\s*[:=]\s*(\S+)", process.stdout)
+    try:
+        document = json.loads(process.stdout)
+        package = _find_adb_package_info(document)
+        if package is None:
+            raise ValueError("one unambiguous package-info object was not found")
+        dependencies = package.get("depends", [])
+        if not isinstance(dependencies, list):
+            raise ValueError("dependency metadata is not a list")
+        metadata = {
+            "name": package["name"],
+            "arch": package["arch"],
+            "version": package["version"],
+            "dependencies": [_normalize_adb_dependency(item) for item in dependencies],
+            "raw_summary": process.stdout[:2000],
+        }
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        return None, f"APK metadata JSON could not be parsed safely: {exc}"
     return metadata, None
 
 

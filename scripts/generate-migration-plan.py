@@ -19,6 +19,17 @@ def load(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def load_evidence_verifier(root: Path):
+    spec = importlib.util.spec_from_file_location(
+        "fetch_thirdparty_evidence", root / "scripts/fetch-thirdparty.py"
+    )
+    if not spec or not spec.loader:
+        raise RuntimeError("cannot load trusted third-party evidence verifier")
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+    return verifier
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot", type=Path, required=True)
@@ -48,13 +59,7 @@ def main() -> int:
         }
         trusted_evidence: set[str] = set()
         if status:
-            spec = importlib.util.spec_from_file_location(
-                "fetch_thirdparty_evidence", root / "scripts/fetch-thirdparty.py"
-            )
-            if not spec or not spec.loader:
-                raise RuntimeError("cannot load trusted third-party evidence verifier")
-            verifier = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(verifier)
+            verifier = load_evidence_verifier(root)
             values = verifier.template_values(
                 capabilities["target_version"], capabilities, args.openclash_version
             )

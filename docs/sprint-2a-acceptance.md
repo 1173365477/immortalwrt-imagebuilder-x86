@@ -75,6 +75,18 @@ Plan CLI path:
   `metadata_status=unavailable` and `architecture=unknown` cannot authorize a
   build.
 
+The dependency-constraint audit at
+`5e324209054c13fd39ea99fb878355bdc66c4fbf` reproduced one final fail-open:
+an APK dependency such as `libexample>=3.0` was reduced to the package name, so
+an official `libexample` version `2.0` incorrectly allowed the build. Versioned
+APK dependencies now retain their operator and required version. Relational
+constraints are evaluated by the target `apk version -t` implementation, not
+by generic string or Python-package comparison. Missing target versions,
+unavailable/failed comparison, conflicts, fuzzy constraints and other
+unsupported expressions remain unresolved and block strict builds. Structured
+`apk adbdump --format json` parsing also prevents malformed or unrecognized
+dependency metadata from silently becoming an empty dependency list.
+
 ## Safety properties and blockers
 
 - Release and package data are read-only HTTPS metadata. A missing release,

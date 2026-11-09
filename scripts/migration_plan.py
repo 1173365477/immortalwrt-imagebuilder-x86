@@ -6,6 +6,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
+import subprocess
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -13,6 +15,9 @@ from urllib.parse import urlparse
 
 
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+APK_DEPENDENCY_RE = re.compile(
+    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9_.+:-]*)(?:(?P<operator><=|>=|=|<|>)(?P<version>\S+))?$"
+)
 PROTECTED_PACKAGES = {
     "apk", "opkg", "base-files", "busybox", "procd", "ubus", "uci",
     "netifd", "firewall4", "dnsmasq", "dnsmasq-full", "odhcpd", "dropbear",
@@ -22,6 +27,60 @@ PROTECTED_PACKAGES = {
 def canonical_digest(value: Any) -> str:
     data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(data).hexdigest()
+
+
+def _apk_version_compare(candidate: str, required: str) -> str | None:
+    """Compare versions with apk-tools itself; return <, =, > or fail closed."""
+    apk = shutil.which("apk")
+    if not apk:
+        return None
+    try:
+        process = subprocess.run(
+            [apk, "version", "-t", candidate, required],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    result = process.stdout.strip()
+    return result if process.returncode == 0 and result in {"<", "=", ">"} else None
+
+
+def _apk_dependency_result(
+    dependency: str,
+    official_index: dict[str, Any],
+    provider_versions: dict[str, str],
+) -> tuple[bool, str | None]:
+    match = APK_DEPENDENCY_RE.fullmatch(dependency)
+    if not match:
+        return False, f"unsupported APK dependency expression: {dependency!r}"
+    name = match.group("name")
+    operator = match.group("operator")
+    required_version = match.group("version")
+    if name in provider_versions:
+        candidate_version = provider_versions[name]
+    else:
+        package = official_index.get(name)
+        if not isinstance(package, dict):
+            return False, f"APK dependency is absent from the target index: {name}"
+        candidate_version = package.get("version")
+    if operator is None:
+        return True, None
+    if not isinstance(candidate_version, str) or not candidate_version:
+        return False, f"APK dependency {name} lacks a target version"
+    if not required_version:
+        return False, f"APK dependency {name} has an incomplete version constraint"
+    comparison = _apk_version_compare(candidate_version, required_version)
+    if comparison is None:
+        return False, f"APK dependency {dependency} could not be compared with apk-tools"
+    accepted = {
+        "=": {"="}, "<": {"<"}, "<=": {"<", "="},
+        ">": {">"}, ">=": {">", "="},
+    }[operator]
+    if comparison not in accepted:
+        return False, (
+            f"APK dependency {dependency} is not satisfied by target version {candidate_version}"
+        )
+    return True, None
 
 
 def _provider_map(rules: dict[str, Any]) -> dict[str, str]:
@@ -147,7 +206,8 @@ def _thirdparty_compatibility(
         return False, "APK validation evidence is missing"
     target_arch = capabilities.get("arch")
     verified_packages: set[str] = set()
-    verified_dependencies: set[str] = set()
+    verified_dependencies: list[str] = []
+    provider_versions: dict[str, str] = {}
     for check in apk_checks:
         relative = PurePosixPath(str(check.get("file") or ""))
         if (
@@ -169,17 +229,19 @@ def _thirdparty_compatibility(
         if thirdparty_files.get(check["file"]) != check["sha256"]:
             return False, "bundled APK is missing or does not match compatibility evidence"
         verified_packages.add(check["package"])
+        provider_versions[check["package"]] = check["version"]
         for dependency in check["dependencies"]:
-            if not isinstance(dependency, str) or not re.fullmatch(r"[A-Za-z0-9_.+:-]+(?:[<>=~]+[^\s]+)?", dependency):
+            if not isinstance(dependency, str) or not dependency:
                 return False, "APK dependency metadata cannot be resolved safely"
-            verified_dependencies.add(re.split(r"[<>=~]", dependency, maxsplit=1)[0])
+            verified_dependencies.append(dependency)
     if verified_packages != set(provider_rule.get("packages", [])):
         return False, "verified APK package identities do not cover the provider rule"
-    unresolved_apk_dependencies = sorted(
-        verified_dependencies - set(official_index) - set(provider_rule.get("packages", []))
-    )
-    if unresolved_apk_dependencies:
-        return False, "APK dependencies are absent from the target index: " + ", ".join(unresolved_apk_dependencies)
+    for dependency in verified_dependencies:
+        satisfied, reason = _apk_dependency_result(
+            dependency, official_index, provider_versions
+        )
+        if not satisfied:
+            return False, reason or "APK dependency constraint is unresolved"
     if not status.get("upstream_release"):
         return False, "upstream release identity is missing"
     return True, "verified provider, release, asset, APK, architecture and dependency evidence matched"

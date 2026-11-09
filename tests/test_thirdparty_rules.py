@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 from pathlib import Path
 import hashlib
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -31,6 +33,48 @@ def test_unknown_or_incomplete_provider_is_unresolved():
     config["providers"]["unknown"] = {"repository": "evil/example"}
     with pytest.raises(MODULE.ProviderError, match="incomplete provider rule"):
         MODULE.validate_provider_config(config)
+
+
+def test_adbdump_json_preserves_dependency_constraints(monkeypatch, tmp_path):
+    package = tmp_path / "package.apk"
+    package.write_bytes(b"ADB0fixture")
+    document = {"info": {
+        "name": "luci-app-example", "version": "1.2-r0", "arch": "noarch",
+        "depends": [
+            {"name": "libexample", "version": "3.0", "match": 5},
+            {"name": "libexact", "version": "1.0"},
+            {"name": "ca-bundle"},
+        ],
+    }}
+    monkeypatch.setattr(MODULE.shutil, "which", lambda name: "/usr/bin/apk")
+    monkeypatch.setattr(MODULE.subprocess, "run", lambda command, **kwargs: SimpleNamespace(
+        returncode=0, stdout=json.dumps(document), stderr=""
+    ))
+    metadata, warning = MODULE.inspect_apk_metadata(package)
+    assert warning is None
+    assert metadata["dependencies"] == ["libexample>=3.0", "libexact=1.0", "ca-bundle"]
+
+
+@pytest.mark.parametrize("depends", [
+    "libexample>=3.0",
+    [{"version": "3.0", "match": 5}],
+    [{"name": "libexample", "match": 5}],
+    [{"name": "libexample", "version": "3.0", "match": 21}],
+])
+def test_adbdump_unparseable_dependencies_are_not_treated_as_empty(monkeypatch, tmp_path, depends):
+    package = tmp_path / "package.apk"
+    package.write_bytes(b"ADB0fixture")
+    document = {"info": {
+        "name": "luci-app-example", "version": "1.2-r0", "arch": "noarch",
+        "depends": depends,
+    }}
+    monkeypatch.setattr(MODULE.shutil, "which", lambda name: "/usr/bin/apk")
+    monkeypatch.setattr(MODULE.subprocess, "run", lambda command, **kwargs: SimpleNamespace(
+        returncode=0, stdout=json.dumps(document), stderr=""
+    ))
+    metadata, warning = MODULE.inspect_apk_metadata(package)
+    assert metadata is None
+    assert "could not be parsed safely" in warning
 
 
 def test_sdk_path_cannot_masquerade_as_imagebuilder_binary():
