@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/1173365477/immortalwrt-imagebuilder-x86/schemas/build-provenance-v1.json",
+  "title": "Smart-upgrade build provenance v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "provenance_id", "digest", "request_id", "created_at", "build_input_id", "build_input_digest", "snapshot_id", "snapshot_digest", "plan_id", "plan_digest", "target", "resolution_digest", "official_index_digest", "provider_assets", "trace", "imagebuilder", "artifact", "build_status", "verification_status", "compatibility_validated", "build_allowed", "flash_ready"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"}, "provenance_id": {"$ref": "#/$defs/urn"}, "digest": {"$ref": "#/$defs/hex"}, "request_id": {"type": "string", "minLength": 1}, "created_at": {"type": "string", "format": "date-time"},
+    "build_input_id": {"$ref": "#/$defs/urn"}, "build_input_digest": {"$ref": "#/$defs/hex"}, "snapshot_id": {"$ref": "#/$defs/urn"}, "snapshot_digest": {"$ref": "#/$defs/hex"}, "plan_id": {"$ref": "#/$defs/urn"}, "plan_digest": {"$ref": "#/$defs/hex"},
+    "target": {"type": "object"}, "resolution_digest": {"$ref": "#/$defs/hex"}, "official_index_digest": {"$ref": "#/$defs/hex"},
+    "provider_assets": {"type": "array", "items": {"type": "object", "required": ["provider", "release_id", "asset_id", "sha256"], "properties": {"provider": {"type": "string"}, "release_id": {"type": "integer"}, "asset_id": {"type": "integer"}, "sha256": {"$ref": "#/$defs/hex"}}, "additionalProperties": false}},
+    "trace": {"type": "object", "additionalProperties": false, "required": ["repository", "commit_sha", "workflow_run_id", "workflow_run_attempt"], "properties": {"repository": {"type": "string"}, "commit_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"}, "workflow_run_id": {"type": "integer", "minimum": 1}, "workflow_run_attempt": {"type": "integer", "minimum": 1}}},
+    "imagebuilder": {"type": "object", "additionalProperties": false, "required": ["url", "filename", "sha256"], "properties": {"url": {"type": "string", "pattern": "^https://"}, "filename": {"type": "string"}, "sha256": {"$ref": "#/$defs/hex"}}},
+    "artifact": {"type": "object", "additionalProperties": false, "required": ["filename", "sha256", "size_bytes"], "properties": {"filename": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/hex"}, "size_bytes": {"type": "integer", "minimum": 1}}},
+    "build_status": {"const": "succeeded"}, "verification_status": {"const": "verified"}, "compatibility_validated": {"const": false}, "build_allowed": {"const": true}, "flash_ready": {"const": false}
+  },
+  "$defs": {"hex": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "urn": {"type": "string", "pattern": "^urn:sha256:[a-f0-9]{64}$"}}
+}
