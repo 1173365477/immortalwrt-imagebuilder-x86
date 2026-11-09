@@ -37,5 +37,24 @@ network or make. CI additionally runs actionlint, ShellCheck, all schemas, the
 full existing pytest suite and a real apk-tools comparator.
 
 No firmware build, router access, flash, reboot, partition change, Issue closure
-or merge is part of this implementation. This report must be updated with final
-HEAD, test count, CI links and any remaining blocker before review handoff.
+or merge is part of this implementation.
+
+## Review handoff (2026-11-09)
+
+- Branch: `feature/smart-upgrade-sprint2b-t13`
+- Draft PR: [#23](https://github.com/1173365477/immortalwrt-imagebuilder-x86/pull/23)
+- Validated implementation HEAD: `73878df1775cc975e94d3d78d3e865254d225558`
+- Push CI: [42587624604](https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/42587624604) — SUCCESS
+- PR CI: [42587633021](https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/42587633021) — SUCCESS
+- pytest: 187 passed, 1 real-apk case skipped in the ordinary suite; the pinned
+  Alpine/apk-tools job then ran that case against the real binary: 1 passed.
+- actionlint 1.7.7, ShellCheck, Python/YAML syntax, existing fixture regression,
+  official 25.12.2 online index validation, version-mismatch rejection and
+  strict unresolved-package rejection all passed.
+
+Remaining review condition: independent review of PR #23. Durable cross-run
+idempotency remains explicitly assigned to T14 and is not represented as a T13
+PASS. There is no unresolved T13 HIGH blocker in the worker validation.
+
+Worker conclusion: **READY FOR INDEPENDENT REVIEW**. Keep the PR Draft until an
+independent reviewer accepts the final HEAD. Do not merge or close Issue #15.
