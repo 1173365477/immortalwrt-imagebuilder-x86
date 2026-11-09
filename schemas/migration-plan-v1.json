@@ -2,31 +2,45 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/1173365477/immortalwrt-imagebuilder-x86/schemas/migration-plan-v1.json",
   "type": "object", "additionalProperties": false, "patternProperties": {"^x-[a-z0-9][a-z0-9-]*$": true},
-  "required": ["schema_version", "plan_id", "source_snapshot_id", "source_snapshot_digest", "status", "privacy_mode", "target", "strict_mode", "build_allowed", "flash_ready", "decisions", "blockers", "warnings", "errors"],
+  "required": ["schema_version", "plan_id", "digest", "source_snapshot_id", "source_snapshot_digest", "status", "privacy_mode", "source", "target", "release", "package_summary", "storage_risk", "explicit_exclusions", "strict_mode", "build_allowed", "build_status", "compatibility_validated", "flash_ready", "decisions", "blockers", "warnings", "errors"],
   "properties": {
-    "schema_version": {"const": "1.0.0"}, "plan_id": {"$ref": "#/$defs/urn"}, "source_snapshot_id": {"$ref": "#/$defs/urn"}, "source_snapshot_digest": {"$ref": "#/$defs/hex"},
+    "schema_version": {"const": "1.0.0"}, "plan_id": {"$ref": "#/$defs/urn"}, "digest": {"$ref": "#/$defs/hex"},
+    "source_snapshot_id": {"$ref": "#/$defs/urn"}, "source_snapshot_digest": {"$ref": "#/$defs/hex"},
     "status": {"$ref": "#/$defs/status"}, "privacy_mode": {"enum": ["local", "redacted"]}, "strict_mode": {"type": "boolean"},
-    "build_allowed": {"type": "boolean"}, "flash_ready": {"const": false},
-    "target": {"type": "object", "additionalProperties": false, "required": ["version", "target", "profile", "architecture", "boot_mode", "image_type", "compatibility"], "properties": {
-      "version": {"type": "string", "minLength": 1}, "target": {"type": "string", "minLength": 1}, "profile": {"type": "string", "minLength": 1},
-      "architecture": {"type": "string", "minLength": 1}, "boot_mode": {"enum": ["efi", "bios", "unknown"]}, "image_type": {"type": ["string", "null"]},
-      "compatibility": {"enum": ["compatible", "incompatible", "unknown"]}
+    "build_allowed": {"type": "boolean"}, "build_status": {"enum": ["not_started", "running", "succeeded", "failed"]},
+    "compatibility_validated": {"type": "boolean"}, "flash_ready": {"const": false},
+    "source": {"$ref": "#/$defs/systemIdentity"},
+    "target": {"type": "object", "additionalProperties": false, "required": ["distribution", "version", "target", "profile", "architecture", "package_manager", "boot_mode", "image_type", "image_name", "image_sha256", "compatibility"], "properties": {
+      "distribution": {"enum": ["openwrt", "immortalwrt"]}, "version": {"type": "string", "minLength": 1}, "target": {"type": "string", "minLength": 1}, "profile": {"type": "string", "minLength": 1},
+      "architecture": {"type": "string", "minLength": 1}, "package_manager": {"enum": ["opkg", "apk"]}, "boot_mode": {"enum": ["efi", "bios", "unknown"]}, "image_type": {"type": ["string", "null"]},
+      "image_name": {"type": ["string", "null"]}, "image_sha256": {"anyOf": [{"$ref": "#/$defs/hex"}, {"type": "null"}]}, "compatibility": {"enum": ["compatible", "incompatible", "unknown"]}
     }},
-    "decisions": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["package", "decision", "reason", "compatible", "evidence"], "properties": {
-      "package": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+_.@-]*$"}, "decision": {"enum": ["keep", "replace", "skip", "block", "review"]},
-      "reason": {"type": "string", "minLength": 1, "maxLength": 2000}, "compatible": {"type": ["boolean", "null"]},
-      "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "maxLength": 512}}
+    "release": {"type": "object", "additionalProperties": false, "required": ["channel", "resolution_digest", "profiles_url", "profiles_sha256", "official_index_digest", "package_index_sources", "imagebuilder_url", "imagebuilder_sha256"], "properties": {
+      "channel": {"const": "release"}, "resolution_digest": {"$ref": "#/$defs/hex"}, "profiles_url": {"type": "string", "pattern": "^https://"}, "profiles_sha256": {"$ref": "#/$defs/hex"},
+      "official_index_digest": {"$ref": "#/$defs/hex"}, "package_index_sources": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["url", "sha256", "checksum_manifest_url", "checksum_manifest_sha256", "checksum_entry"], "properties": {"url": {"type": "string", "pattern": "^https://"}, "sha256": {"$ref": "#/$defs/hex"}, "checksum_manifest_url": {"type": "string", "pattern": "^https://"}, "checksum_manifest_sha256": {"$ref": "#/$defs/hex"}, "checksum_entry": {"type": "string", "minLength": 1}}}},
+      "imagebuilder_url": {"type": "string", "pattern": "^https://"}, "imagebuilder_sha256": {"$ref": "#/$defs/hex"}
+    }},
+    "package_summary": {"type": "object", "additionalProperties": false, "required": ["installed", "keep", "replace", "skip", "review", "block"], "properties": {"installed": {"type": "integer", "minimum": 0}, "keep": {"type": "integer", "minimum": 0}, "replace": {"type": "integer", "minimum": 0}, "skip": {"type": "integer", "minimum": 0}, "review": {"type": "integer", "minimum": 0}, "block": {"type": "integer", "minimum": 0}}},
+    "storage_risk": {"type": "object", "additionalProperties": false, "required": ["status", "docker_present", "firmware_overwrite_risks", "flash_blockers"], "properties": {"status": {"$ref": "#/$defs/status"}, "docker_present": {"type": "boolean"}, "firmware_overwrite_risks": {"type": "array", "items": {"enum": ["same_physical_disk", "different_physical_disk", "unknown"]}}, "flash_blockers": {"type": "array", "items": {"type": "string", "minLength": 1}}}},
+    "explicit_exclusions": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["package", "source_version", "snapshot_digest", "reason", "optional"], "properties": {"package": {"$ref": "#/$defs/packageName"}, "source_version": {"type": ["string", "null"]}, "snapshot_digest": {"$ref": "#/$defs/hex"}, "reason": {"type": "string", "minLength": 1, "maxLength": 1000}, "optional": {"const": true}}}},
+    "decisions": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["package", "source_version", "origin", "install_reason", "decision", "target_package", "match_type", "provider", "reason", "compatible", "dependencies", "replacements", "conflicts", "evidence"], "properties": {
+      "package": {"$ref": "#/$defs/packageName"}, "source_version": {"type": ["string", "null"]}, "origin": {"enum": ["official", "third_party", "unknown"]}, "install_reason": {"enum": ["system_default", "manual", "dependency", "unknown"]},
+      "decision": {"enum": ["keep", "replace", "skip", "block", "review"]}, "target_package": {"anyOf": [{"$ref": "#/$defs/packageName"}, {"type": "null"}]}, "match_type": {"enum": ["official", "third_party", "replacement", "dependency_recalculation", "explicit_exclusion", "unresolved"]}, "provider": {"type": ["string", "null"]},
+      "reason": {"type": "string", "minLength": 1, "maxLength": 2000}, "compatible": {"type": ["boolean", "null"]}, "dependencies": {"type": "array", "items": {"type": "string"}}, "replacements": {"type": "array", "items": {"type": "string"}}, "conflicts": {"type": "array", "items": {"type": "string"}}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "maxLength": 512}}
     }, "allOf": [
       {"if": {"properties": {"decision": {"enum": ["block", "review"]}}}, "then": {"properties": {"compatible": {"type": "null"}}}},
       {"if": {"properties": {"compatible": {"const": true}}}, "then": {"properties": {"decision": {"enum": ["keep", "replace", "skip"]}}}}
     ]}},
-    "blockers": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 512},
-    "warnings": {"type": "array", "items": {"type": "string"}}, "errors": {"type": "array", "items": {"type": "string"}}
+    "blockers": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 512}, "warnings": {"type": "array", "items": {"type": "string"}}, "errors": {"type": "array", "items": {"type": "string"}}
   },
   "allOf": [
     {"if": {"properties": {"build_allowed": {"const": true}}}, "then": {"properties": {"status": {"const": "ok"}, "blockers": {"maxItems": 0}, "errors": {"maxItems": 0}, "target": {"properties": {"compatibility": {"const": "compatible"}}}}}},
     {"if": {"properties": {"target": {"properties": {"compatibility": {"enum": ["unknown", "incompatible"]}}}}}, "then": {"properties": {"build_allowed": {"const": false}}}},
-    {"if": {"properties": {"status": {"enum": ["blocked", "failed"]}}}, "then": {"anyOf": [{"properties": {"blockers": {"minItems": 1}}}, {"properties": {"errors": {"minItems": 1}}}], "properties": {"build_allowed": {"const": false}}}}
+    {"if": {"properties": {"status": {"enum": ["partial", "blocked", "failed", "unknown"]}}}, "then": {"properties": {"build_allowed": {"const": false}}}},
+    {"if": {"properties": {"status": {"enum": ["blocked", "failed"]}}}, "then": {"anyOf": [{"properties": {"blockers": {"minItems": 1}}}, {"properties": {"errors": {"minItems": 1}}}]}}
   ],
-  "$defs": {"status": {"enum": ["ok", "partial", "blocked", "failed", "unknown"]}, "hex": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "urn": {"type": "string", "pattern": "^urn:sha256:[a-f0-9]{64}$"}}
+  "$defs": {
+    "status": {"enum": ["ok", "partial", "blocked", "failed", "unknown"]}, "hex": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "urn": {"type": "string", "pattern": "^urn:sha256:[a-f0-9]{64}$"}, "packageName": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+_.@-]*$"},
+    "systemIdentity": {"type": "object", "additionalProperties": false, "required": ["distribution", "version", "target", "profile", "architecture", "package_manager", "boot_mode"], "properties": {"distribution": {"type": "string"}, "version": {"type": ["string", "null"]}, "target": {"type": ["string", "null"]}, "profile": {"type": ["string", "null"]}, "architecture": {"type": ["string", "null"]}, "package_manager": {"enum": ["opkg", "apk", "unknown"]}, "boot_mode": {"enum": ["efi", "bios", "unknown"]}}}
+  }
 }

@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0.0",
+  "snapshot_id": "urn:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "digest": {"algorithm": "sha256", "canonicalization": "evidence-sha256-v2", "value": "1111111111111111111111111111111111111111111111111111111111111111"},
+  "status": "ok",
+  "privacy_mode": "redacted",
+  "system": {
+    "distribution": "ImmortalWrt", "version": "25.12.2", "target": "x86/64", "profile": "generic",
+    "architecture": "x86_64", "package_architecture": "x86_64", "kernel_architecture": "x86_64",
+    "boot_mode": "efi", "boot_evidence": "fixture_override", "rootfs_type": "overlay",
+    "firmware_image_type": "combined-efi", "package_manager": "apk", "identity_status": "consistent", "identity_errors": []
+  },
+  "packages": {
+    "installed": [
+      {"name": "busybox", "version": "1.36.1", "origin": "official", "install_reason": "system_default", "confidence": "high", "evidence": ["firmware-rom-baseline"], "dependencies_raw": null, "depends": [], "provides_raw": null},
+      {"name": "ca-bundle", "version": "20251003", "origin": "official", "install_reason": "dependency", "confidence": "high", "evidence": ["apk-installed-db"], "dependencies_raw": null, "depends": [], "provides_raw": null},
+      {"name": "curl", "version": "8.16.0", "origin": "official", "install_reason": "manual", "confidence": "high", "evidence": ["apk-world", "operator-confirmed"], "dependencies_raw": "ca-bundle", "depends": [{"raw": "ca-bundle", "relation": "package", "name": "ca-bundle", "operator": null, "version": null}], "provides_raw": null}
+    ],
+    "top_level": ["curl"], "intent_candidates": ["curl"], "classification_status": "complete", "truncated": false
+  },
+  "services": {
+    "openclash": {"package_detected": false, "executable_exists": false, "service_definition_exists": false, "running": "stopped"},
+    "lucky": {"package_detected": false, "executable_exists": false, "service_definition_exists": false, "running": "stopped"},
+    "adguardhome": {"package_detected": false, "executable_exists": false, "service_definition_exists": false, "running": "stopped"},
+    "docker": {"package_detected": false, "executable_exists": false, "service_definition_exists": false, "running": "stopped"}
+  },
+  "storage": {
+    "status": "ok", "evidence_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+    "scan_completeness": {"containers": "verified", "volumes": "verified", "mounts": "verified", "container_scope": "all", "volume_scope": "all"},
+    "docker": {"installed": false, "daemon_state": "unavailable", "root": null, "configured_root": null, "root_source": "none", "verified": false, "config_mismatch": false},
+    "mount_inventory": {"state": "complete", "truncated": false, "entries": []},
+    "targets": [], "errors": []
+  },
+  "warnings": [], "errors": []
+}

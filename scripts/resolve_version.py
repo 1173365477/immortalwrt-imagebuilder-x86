@@ -11,9 +11,8 @@ import re
 from html.parser import HTMLParser
 from pathlib import Path
 
-from release_utils import ReleaseValidationError, get_url, parse_version
+from release_utils import ReleaseValidationError, get_url, official_download_root, parse_version
 
-RELEASE_INDEX = "https://downloads.immortalwrt.org/releases/"
 STABLE_VERSION = re.compile(r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$")
 
 
@@ -39,11 +38,11 @@ def stable_versions(index_html: str) -> list[str]:
     return sorted(candidates, key=lambda v: (parse_version(v).major, parse_version(v).minor, parse_version(v).patch or 0), reverse=True)
 
 
-def resolve(request: str, index_html: str | None = None) -> str:
+def resolve(request: str, index_html: str | None = None, *, distribution: str = "immortalwrt") -> str:
     if request != "latest":
         return parse_version(request).target_version
     if index_html is None:
-        index_html = get_url(RELEASE_INDEX).decode("utf-8")
+        index_html = get_url(f"{official_download_root(distribution)}/releases/").decode("utf-8")
     candidates = stable_versions(index_html)
     if not candidates:
         raise ReleaseValidationError("No stable ImmortalWrt release directories found in the official index.")
@@ -53,10 +52,11 @@ def resolve(request: str, index_html: str | None = None) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", default="latest")
+    parser.add_argument("--distribution", choices=("immortalwrt", "openwrt"), default="immortalwrt")
     parser.add_argument("--output", type=Path, default=Path("generated/resolved-version.txt"))
     args = parser.parse_args()
     try:
-        version = resolve(args.version)
+        version = resolve(args.version, distribution=args.distribution)
     except (ReleaseValidationError, UnicodeDecodeError) as exc:
         parser.exit(2, f"::error::{exc}\n")
     args.output.parent.mkdir(parents=True, exist_ok=True)
