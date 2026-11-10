@@ -89,9 +89,11 @@ jobs:
           sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$root/host-apk"
           ln -s "$GITHUB_WORKSPACE/scripts/apk-chroot-wrapper.sh" "$RUNNER_TEMP/apk-bin/apk"
           echo "$RUNNER_TEMP/apk-bin" >> "$GITHUB_PATH"
-          echo "APK_CHROOT_ROOT=$root" >> "$GITHUB_ENV"
-          echo "APK_CHROOT_ALLOWED_ROOTS=$RUNNER_TEMP/thirdparty-temp:$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
-          echo "TMPDIR=$RUNNER_TEMP/thirdparty-temp" >> "$GITHUB_ENV"
+          {
+            echo "APK_CHROOT_ROOT=$root"
+            echo "APK_CHROOT_ALLOWED_ROOTS=$RUNNER_TEMP/thirdparty-temp:$GITHUB_WORKSPACE"
+            echo "TMPDIR=$RUNNER_TEMP/thirdparty-temp"
+          } >> "$GITHUB_ENV"
           APK_CHROOT_ROOT="$root" APK_CHROOT_ALLOWED_ROOTS="$RUNNER_TEMP/thirdparty-temp:$GITHUB_WORKSPACE" \
             "$RUNNER_TEMP/apk-bin/apk" --version
           [[ "$(APK_CHROOT_ROOT="$root" APK_CHROOT_ALLOWED_ROOTS="$RUNNER_TEMP/thirdparty-temp:$GITHUB_WORKSPACE" \
