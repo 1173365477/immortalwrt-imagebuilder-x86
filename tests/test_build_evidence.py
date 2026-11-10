@@ -106,7 +106,7 @@ def frozen_request(tmp_path: Path) -> tuple[Path, dict]:
                   "packages_path": packages_path.relative_to(repo).as_posix(),
                   "packages_sha256": sha256_file(packages_path), "base_packages": [],
                   "files_path": files_path.relative_to(repo).as_posix(),
-                  "files_digest": tree_digest(files_path), "apk_tools_version": "2.14.12",
+                  "files_digest": tree_digest(files_path), "apk_tools_version": "3.0.9",
                   "config_digest": ""},
         "safety": {"strict_mode": True, "build_allowed": True,
                    "compatibility_validated": False, "flash_ready": False},
@@ -476,7 +476,7 @@ def test_real_apk_tools_version_comparison_when_configured(monkeypatch):
     metadata, warning = module.inspect_apk_metadata(Path(package))
     assert warning is None
     assert metadata is not None
-    assert metadata["name"] == "apk-tools"
+    assert metadata["name"] == "apk-metadata-fixture"
     assert metadata["arch"] == "x86_64"
-    assert metadata["version"] == "2.14.12-r0"
-    assert isinstance(metadata["dependencies"], list) and metadata["dependencies"]
+    assert metadata["version"] == "1.0-r0"
+    assert metadata["dependencies"] == ["musl"]

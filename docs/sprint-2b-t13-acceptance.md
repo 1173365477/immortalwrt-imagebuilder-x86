@@ -24,7 +24,7 @@ without repository-bound immutable evidence fails before any download.
 | Strict unified build gate | PASS | Workflow preflight and `build-image.sh`; legacy/non-strict bypass removed |
 | TOCTOU resistance | PASS | Private staged bytes and immediate pre-make re-hash |
 | Provenance | PASS | Actual firmware SHA/size and complete evidence/run trace |
-| Real apk-tools semantics | PASS | Pinned Alpine 3.22.8 rootfs, apk-tools 2.14.12 integration test |
+| Real apk-tools semantics | PASS | Pinned Alpine 3.23.8 rootfs, apk-tools 3.0.9 version and APKv3 metadata integration test |
 | No-flash boundary | PASS | Schemas and provenance require `flash_ready=false` |
 | Durable cross-run idempotency | OUT OF SCOPE | T14 Gateway responsibility; concurrency alone is documented as insufficient |
 
@@ -70,9 +70,12 @@ Confirmed. The original wrapper forwarded a host absolute path unchanged to
 `Original unmapped chroot path correctly failed`. A restricted wrapper now
 copies only a regular, non-symlink, size-limited APK from configured roots into
 a private chroot ingress, permits only version comparison and JSON `adbdump`,
-and cleans the ingress. The same test verifies SHA-256 of the legal
-`apk-tools-2.14.12-r0.apk` and requires `inspect_apk_metadata()` to obtain its
-name, x86_64 architecture, version and non-empty dependency list.
+and cleans the ingress. The integration runs pinned apk-tools 3.0.9 (the first
+pinned runtime in this workflow that actually provides `adbdump`), creates a
+valid APKv3 fixture with the real `apk mkpkg`, and requires
+`inspect_apk_metadata()` to obtain its exact name, x86_64 architecture, version
+and `musl` dependency. apk-tools 2.14 was rejected as a test runtime because it
+does not implement `adbdump` and therefore cannot validate APKv3 metadata.
 
 ### B — third-party Provider completeness
 

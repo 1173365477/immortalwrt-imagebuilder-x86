@@ -74,15 +74,15 @@ jobs:
 
       - name: Install pinned apk-tools comparator
         env:
-          ALPINE_ROOTFS_VERSION: "3.22.8"
-          ALPINE_ROOTFS_SHA256: "2d7f46af9b7e86ad64ebeba3fe9b75b62dd5b259e708afb2ab21268f627696e5"
+          ALPINE_ROOTFS_VERSION: "3.23.8"
+          ALPINE_ROOTFS_SHA256: "56e2810205c17a5dff78cdd7b2c2af4ccdef16f18d765d5bb0f527438b136676"
         run: |
           set -euo pipefail
           archive="$RUNNER_TEMP/alpine-minirootfs-${ALPINE_ROOTFS_VERSION}-x86_64.tar.gz"
           root="$RUNNER_TEMP/alpine-root"
           curl -fL --retry 3 --proto '=https' \
             -o "$archive" \
-            "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-${ALPINE_ROOTFS_VERSION}-x86_64.tar.gz"
+            "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-${ALPINE_ROOTFS_VERSION}-x86_64.tar.gz"
           printf '%s  %s\n' "$ALPINE_ROOTFS_SHA256" "$archive" | sha256sum -c -
           mkdir -p "$root" "$RUNNER_TEMP/apk-bin" "$RUNNER_TEMP/thirdparty-temp"
           sudo tar -xzf "$archive" -C "$root"

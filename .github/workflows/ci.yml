@@ -65,23 +65,28 @@ jobs:
 
       - name: Exercise pinned real apk-tools version semantics
         env:
-          ALPINE_ROOTFS_VERSION: "3.22.8"
-          ALPINE_ROOTFS_SHA256: "2d7f46af9b7e86ad64ebeba3fe9b75b62dd5b259e708afb2ab21268f627696e5"
+          ALPINE_ROOTFS_VERSION: "3.23.8"
+          ALPINE_ROOTFS_SHA256: "56e2810205c17a5dff78cdd7b2c2af4ccdef16f18d765d5bb0f527438b136676"
         run: |
           set -euo pipefail
           archive="$RUNNER_TEMP/alpine-minirootfs-${ALPINE_ROOTFS_VERSION}-x86_64.tar.gz"
           root="$RUNNER_TEMP/alpine-apk-test"
           curl -fL --retry 3 --proto '=https' -o "$archive" \
-            "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-${ALPINE_ROOTFS_VERSION}-x86_64.tar.gz"
+            "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-${ALPINE_ROOTFS_VERSION}-x86_64.tar.gz"
           printf '%s  %s\n' "$ALPINE_ROOTFS_SHA256" "$archive" | sha256sum -c -
           mkdir -p "$root" "$RUNNER_TEMP/apk-test-bin"
           sudo tar -xzf "$archive" -C "$root"
           sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$root/host-apk"
           ln -s "$GITHUB_WORKSPACE/scripts/apk-chroot-wrapper.sh" "$RUNNER_TEMP/apk-test-bin/apk"
-          test_apk="$RUNNER_TEMP/apk-tools-2.14.12-r0.apk"
-          curl -fL --retry 3 --proto '=https' -o "$test_apk" \
-            https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/apk-tools-2.14.12-r0.apk
-          printf '%s  %s\n' "fdf8a327219e1e6e5d4e45fbd7db7cf4881fe3e641e831e58caa72e83a1acace" "$test_apk" | sha256sum -c -
+          sudo mkdir -p "$root/tmp/apk-fixture-root/usr/share/apk-metadata-fixture"
+          printf '%s\n' 'pinned real apk-tools metadata fixture' | \
+            sudo tee "$root/tmp/apk-fixture-root/usr/share/apk-metadata-fixture/README" >/dev/null
+          sudo chroot "$root" /sbin/apk --root / mkpkg --no-xattrs --compat=3.0.0_pre3 \
+            -I name:apk-metadata-fixture -I version:1.0-r0 -I arch:x86_64 \
+            -I depends:musl -F /tmp/apk-fixture-root -o /tmp/apk-metadata-fixture.apk
+          test_apk="$RUNNER_TEMP/apk-metadata-fixture.apk"
+          sudo cp "$root/tmp/apk-metadata-fixture.apk" "$test_apk"
+          sudo chown "$(id -u):$(id -g)" "$test_apk"
           if sudo chroot "$root" /sbin/apk adbdump --format json "$test_apk" >/dev/null 2>&1; then
             echo "unmapped host APK unexpectedly accessible inside chroot" >&2
             exit 1

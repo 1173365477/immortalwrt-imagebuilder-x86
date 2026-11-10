@@ -80,7 +80,8 @@ Concurrency groups reduce duplicate simultaneous runs. They are not durable
 cross-run idempotency; T14 must implement persistent request/digest conflict
 handling.
 
-The pinned comparator is apk-tools 2.14.12 from Alpine 3.22.8. CI verifies the
+The pinned comparator and APKv3 metadata inspector are apk-tools 3.0.9 from
+Alpine 3.23.8. CI verifies the
 official minirootfs SHA-256 and executes real `apk version -t` cases. A Build
 Input with another comparator version is rejected.
 
@@ -90,8 +91,9 @@ commands and JSON `adbdump`. For `adbdump`, it resolves a regular non-symlink
 APK under an explicit allowed root, enforces a 512 MiB limit, copies it into a
 per-call mode-0700 ingress directory, makes the copy read-only and passes only
 the chroot-local path to apk. The ingress is deleted after inspection. CI first
-proves the original unmapped host path fails, then inspects a checksum-pinned
-legal Alpine APK through this mapping. Production revalidation also fixes
+proves the original unmapped host path fails, then uses the pinned real
+`apk mkpkg` implementation to create a valid APKv3 fixture and inspects it
+through this mapping. Production revalidation also fixes
 `TMPDIR` to a dedicated runner directory and permits only that directory plus
 the checked-out immutable evidence tree; it does not expose general host paths.
 
