@@ -12,16 +12,20 @@ case "${1:-}" in
     exec sudo chroot "$ROOT" /sbin/apk --version
     ;;
   version)
-    (( $# == 4 )) && [[ "${2:-}" == "-t" ]] || { echo "unsupported apk version command" >&2; exit 2; }
+    if (( $# != 4 )) || [[ "${2:-}" != "-t" ]]; then
+      echo "unsupported apk version command" >&2
+      exit 2
+    fi
     [[ "$3" =~ ^[A-Za-z0-9][A-Za-z0-9._+~:-]{0,255}$ && "$4" =~ ^[A-Za-z0-9][A-Za-z0-9._+~:-]{0,255}$ ]] || {
       echo "invalid apk version operand" >&2; exit 2;
     }
     exec sudo chroot "$ROOT" /sbin/apk version -t "$3" "$4"
     ;;
   adbdump)
-    (( $# == 4 )) && [[ "${2:-}" == "--format" && "${3:-}" == "json" ]] || {
-      echo "unsupported apk adbdump command" >&2; exit 2;
-    }
+    if (( $# != 4 )) || [[ "${2:-}" != "--format" || "${3:-}" != "json" ]]; then
+      echo "unsupported apk adbdump command" >&2
+      exit 2
+    fi
     SOURCE="$4"
     [[ -f "$SOURCE" && ! -L "$SOURCE" ]] || { echo "APK input must be a regular non-symlink file" >&2; exit 2; }
     SOURCE="$(realpath "$SOURCE")"
