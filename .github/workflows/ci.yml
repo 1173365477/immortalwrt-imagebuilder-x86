@@ -57,11 +57,46 @@ jobs:
 
       - name: Run ShellCheck
         run: |
-          shellcheck -x scripts/build-image.sh files/etc/uci-defaults/99-install-thirdparty
+          shellcheck -x scripts/build-image.sh scripts/apk-chroot-wrapper.sh files/etc/uci-defaults/99-install-thirdparty
           shellcheck -s sh scripts/smart-upgrade-agent.sh scripts/smart-upgrade-storage.sh
 
       - name: Run unit and future-release fixture tests
         run: pytest -q
+
+      - name: Exercise pinned real apk-tools version semantics
+        env:
+          ALPINE_ROOTFS_VERSION: "3.23.8"
+          ALPINE_ROOTFS_SHA256: "56e2810205c17a5dff78cdd7b2c2af4ccdef16f18d765d5bb0f527438b136676"
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/alpine-minirootfs-${ALPINE_ROOTFS_VERSION}-x86_64.tar.gz"
+          root="$RUNNER_TEMP/alpine-apk-test"
+          curl -fL --retry 3 --proto '=https' -o "$archive" \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-${ALPINE_ROOTFS_VERSION}-x86_64.tar.gz"
+          printf '%s  %s\n' "$ALPINE_ROOTFS_SHA256" "$archive" | sha256sum -c -
+          mkdir -p "$root" "$RUNNER_TEMP/apk-test-bin"
+          sudo tar -xzf "$archive" -C "$root"
+          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$root/host-apk"
+          ln -s "$GITHUB_WORKSPACE/scripts/apk-chroot-wrapper.sh" "$RUNNER_TEMP/apk-test-bin/apk"
+          sudo mkdir -p "$root/tmp/apk-fixture-root/usr/share/apk-metadata-fixture"
+          printf '%s\n' 'pinned real apk-tools metadata fixture' | \
+            sudo tee "$root/tmp/apk-fixture-root/usr/share/apk-metadata-fixture/README" >/dev/null
+          sudo chroot "$root" /sbin/apk --root / mkpkg --no-xattrs --compat=3.0.0_pre3 \
+            -I name:apk-metadata-fixture -I version:1.0-r0 -I arch:x86_64 \
+            -I depends:musl -F /tmp/apk-fixture-root -o /tmp/apk-metadata-fixture.apk
+          test_apk="$RUNNER_TEMP/apk-metadata-fixture.apk"
+          sudo cp "$root/tmp/apk-metadata-fixture.apk" "$test_apk"
+          sudo chown "$(id -u):$(id -g)" "$test_apk"
+          if sudo chroot "$root" /sbin/apk adbdump --format json "$test_apk" >/dev/null 2>&1; then
+            echo "unmapped host APK unexpectedly accessible inside chroot" >&2
+            exit 1
+          fi
+          echo "Original unmapped chroot path correctly failed"
+          APK_REAL_BINARY="$RUNNER_TEMP/apk-test-bin/apk" \
+          APK_REAL_PACKAGE="$test_apk" \
+          APK_CHROOT_ROOT="$root" \
+          APK_CHROOT_ALLOWED_ROOTS="$RUNNER_TEMP" \
+            pytest -q tests/test_build_evidence.py -k real_apk_tools
 
       - name: Exercise Analyze and Resolve with fixtures
         run: |

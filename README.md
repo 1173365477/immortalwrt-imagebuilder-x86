@@ -14,27 +14,24 @@
 
 > **磁盘安全警告**：`combined-efi.img.gz` 是完整磁盘镜像，主要用于全新安装、救援或完整写盘。本仓库不会刷写磁盘，也不声称它能安全保留你手工扩展后的 GPT、p3、p4 或未分配空间。不要在未单独验证 x86 sysupgrade 对现有 GPT 的处理前，直接 `dd` 到当前 NVMe。
 
-## 一键构建最新稳定版（latest）
+## 不可变构建请求
 
-在 **Actions → Build ImmortalWrt x86_64 firmware → Run workflow** 中选择 `main`（合并后）或此功能分支，并保持 `immortalwrt_version=latest`。每次运行都会从官方 `https://downloads.immortalwrt.org/releases/` 目录中选择数值版本最高的正式版（仅识别 `major.minor.patch` 目录，排除 snapshot、RC、beta），记录解析后的精确版本，再沿用原有 x86/64、EFI、APK、官方包与第三方兼容性检查。网络或官方目录不可用时直接失败，不回退到默认版本。
+T13 起，Build workflow 不再现场解析 `latest`、旧报告或第三方 Release。分析阶段必须先冻结精确 Release、Snapshot、Migration Plan、官方索引、第三方资产/APK 摘要、包清单、files 树和受信任构建代码 Commit，生成 `build-input-v1.json`。Build 仅接受仓库内 `evidence/requests/<request-id>`，逐项复核后才调用 ImageBuilder。
 
-**安全限制：** 本仓库属于“根据当前路由器报告构建迁移固件”。`latest` 并不会忽略 `owut` 目标检查。上传的 `reports/current-system.txt` 中 `Version-to` **必须与自动发现的精确版本一致**，否则在构建前明确失败。请在路由器重新生成目标为该版本的报告，并检查脱敏后再提交。未来最新版本改变时必须重新生成 owut 报告；如果只是想构建指定历史版本，仍可手动输入如 `25.12.2`。
-
-下载 Artifact 中的 `resolved-version.txt` 可以确认当次最终选择的版本。只有在校验全部通过后才会生成镜像；不会自动刷机，也不保证完整磁盘镜像保留你的 NVMe 自定义分区。
+旧 `workflow_dispatch` 参数因 GitHub 单工作流 10 输入上限，原样保留在 **Legacy build request compatibility** 只读入口；该入口只会明确停止并提示先运行分析流程。`strict_mode=false`、`latest`、旧 `system-analysis.json`、任意 URL 或可变 Git ref 均不能授权构建。完整协议见 [T13 immutable build protocol](docs/t13-immutable-build.md)。
 
 ## 工作流
 
 ```text
-当前 ImmortalWrt
-  └─ owut/opkg 报告
-       └─ Analyze：健壮解析为 system-analysis.json
-            └─ Resolve：规则引擎选择功能包、替代和第三方 provider
-                 └─ Validate：报告版本一致性 + 官方 release 能力/索引检查
-                      └─ Fetch：逐 provider 判断 compatible/unresolved/incompatible
-                           └─ Build：校验 ImageBuilder → make image → evidence/artifact
+只读 System Snapshot
+  └─ Release Resolver + package/provider compatibility
+       └─ Migration Plan（build_allowed 安全结论）
+            └─ build-input-v1.json（冻结全部证据与字节摘要）
+                 └─ Verify + private staging
+                      └─ ImageBuilder → firmware + build-provenance-v1.json
 ```
 
-`Analyze migration report` 只分析并上传 `migration-analysis` artifact。`Build ImmortalWrt x86_64 firmware` 会重新执行 Analyze → Resolve → Validate → Build，避免使用过期分析结果。
+`Analyze migration report` 仍可生成历史兼容报告；它不能直接授权 Build。正式构建必须由经过审查并提交的不可变请求驱动。
 
 ## 第一次使用
 
@@ -98,23 +95,17 @@ reports/top-level-packages.txt   # 推荐，owut 用户顶层包
 
 ### 3. 运行 Build
 
-确认分析后运行 **Build ImmortalWrt x86_64 firmware**：
+确认不可变证据已提交后运行 **Build ImmortalWrt x86_64 firmware**：
 
 | 输入 | 默认值 | 说明 |
 |---|---:|---|
-| `immortalwrt_version` | `latest` | 自动选择最新正式版，或输入精确 release（如 25.12.2） |
-| `report_path` | `reports/current-system.txt` | 完整 owut 报告 |
-| `include_openclash` | `true` | 报告触发 OpenClash 时启用 provider |
-| `openclash_version` | `0.48.002` | GitHub Release tag 版本 |
-| `include_nikki` | `true` | 报告触发 Nikki 时启用 provider |
-| `include_lucky` | `true` | 报告触发 Lucky 时启用 provider |
-| `rootfs_size` | `8192` | ext4 根分区大小，MiB |
-| `create_release` | `false` | 是否创建 GitHub Release |
-| `strict_mode` | `true` | 有 unresolved 就停止 |
+| `request_id` | — | 不可变请求标识 |
+| `snapshot_ref` | — | 必须等于 `evidence/requests/<request-id>` |
+| `target_version` | — | 必须与 Build Input 冻结版本一致 |
+| 旧参数 | 保留 | 仅保持接口兼容，不能改变冻结输入或绕过门禁 |
+| `create_release` | `false` | T13 禁用；工作流仅有 contents:read |
 
-开关不会无条件把插件塞进固件：对应包必须先在迁移报告中被检测到。关闭已被报告触发的 provider 会把该包列为 unresolved。
-
-`strict_mode=false` 会允许跳过 unresolved/incompatible 的第三方 provider 并继续构建，同时产生醒目的 `DEGRADED MIGRATION` 标记；缺失包和兼容性报告仍在 artifact 中。它不是“自动认为缺失包不重要”。`strict_mode=true` 对 unresolved package 或已请求但无法确认兼容的 provider 都会失败。
+任何 unresolved/incompatible/stale/tampered 证据都会在下载 ImageBuilder 前失败。Build 固定执行严格门禁，旧 `strict_mode=false` 只属于分析兼容接口。
 
 ### Release 能力发现与失败方式
 
@@ -267,11 +258,11 @@ immortalwrt_version = 29.0.1
 report_path = reports/current-system.txt
 ```
 
-Actions 会验证 29.0.1 官方 release、ImageBuilder、报告目标、官方包和三个 provider。若 Nikki/Lucky 尚无 29.0 明确资产，strict 模式会停止；非 strict 模式会跳过它们，以 `-degraded` artifact 和 `SUCCESS WITH WARNINGS` 摘要交付核心固件。无需把源码中的 `25.12` 改成 `29.0`。
+分析阶段会验证 29.0.1 官方 release、ImageBuilder、报告目标、官方包和三个 provider。若 Nikki/Lucky 尚无明确资产，Migration Plan 保守阻断，不得生成可构建的不可变请求。
 
 ## 构建前后日志
 
-构建前会打印 source/target、target/profile/rootfs、ImageBuilder URL、基础包、动态官方包、第三方包、missing、skipped、replacement、降级警告和 APK 文件名。
+构建前会打印冻结的 request、target、Migration Plan 与 Build Input 摘要；不会在构建阶段重新选择 latest、包或 Provider。
 
 构建后会列出 `bin/targets/x86/64/` 的全部文件，重点检查：
 

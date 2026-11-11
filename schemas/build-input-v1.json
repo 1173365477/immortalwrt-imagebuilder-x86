@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/1173365477/immortalwrt-imagebuilder-x86/schemas/build-input-v1.json",
+  "title": "Immutable smart-upgrade build input v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "build_input_id", "digest", "request_id", "created_at", "snapshot", "migration_plan", "target", "release", "thirdparty", "build", "safety"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "build_input_id": {"$ref": "#/$defs/urn"},
+    "digest": {"$ref": "#/$defs/hex"},
+    "request_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "snapshot": {"$ref": "#/$defs/snapshot"},
+    "migration_plan": {"$ref": "#/$defs/plan"},
+    "target": {"$ref": "#/$defs/target"},
+    "release": {"$ref": "#/$defs/release"},
+    "thirdparty": {"type": "array", "items": {"$ref": "#/$defs/provider"}},
+    "build": {"$ref": "#/$defs/build"},
+    "safety": {"$ref": "#/$defs/safety"}
+  },
+  "$defs": {
+    "hex": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "urn": {"type": "string", "pattern": "^urn:sha256:[a-f0-9]{64}$"},
+    "path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[A-Za-z0-9._@+/-]+$"},
+    "snapshot": {"type": "object", "additionalProperties": false, "required": ["path", "snapshot_id", "snapshot_digest", "file_sha256"], "properties": {"path": {"$ref": "#/$defs/path"}, "snapshot_id": {"$ref": "#/$defs/urn"}, "snapshot_digest": {"$ref": "#/$defs/hex"}, "file_sha256": {"$ref": "#/$defs/hex"}}},
+    "plan": {"type": "object", "additionalProperties": false, "required": ["path", "plan_id", "plan_digest", "file_sha256"], "properties": {"path": {"$ref": "#/$defs/path"}, "plan_id": {"$ref": "#/$defs/urn"}, "plan_digest": {"$ref": "#/$defs/hex"}, "file_sha256": {"$ref": "#/$defs/hex"}}},
+    "target": {"type": "object", "additionalProperties": false, "required": ["distribution", "version", "target", "subtarget", "profile", "architecture", "package_manager", "filesystem", "image_type", "expected_image_name"], "properties": {"distribution": {"enum": ["openwrt", "immortalwrt"]}, "version": {"type": "string", "minLength": 1}, "target": {"type": "string", "minLength": 1}, "subtarget": {"type": "string", "minLength": 1}, "profile": {"type": "string", "minLength": 1}, "architecture": {"type": "string", "minLength": 1}, "package_manager": {"const": "apk"}, "filesystem": {"type": "string", "minLength": 1}, "image_type": {"type": "string", "minLength": 1}, "expected_image_name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$"}}},
+    "indexSource": {"type": "object", "additionalProperties": false, "required": ["url", "sha256", "checksum_manifest_url", "checksum_manifest_sha256", "checksum_entry"], "properties": {"url": {"type": "string", "pattern": "^https://"}, "sha256": {"$ref": "#/$defs/hex"}, "checksum_manifest_url": {"type": "string", "pattern": "^https://"}, "checksum_manifest_sha256": {"$ref": "#/$defs/hex"}, "checksum_entry": {"type": "string", "minLength": 1}}},
+    "release": {"type": "object", "additionalProperties": false, "required": ["identity", "resolution_digest", "capabilities_path", "capabilities_file_sha256", "profiles_sha256", "official_index_digest", "official_index_path", "official_index_file_sha256", "package_index_sources", "imagebuilder_url", "imagebuilder_filename", "imagebuilder_sha256"], "properties": {"identity": {"type": "string", "minLength": 1}, "resolution_digest": {"$ref": "#/$defs/hex"}, "capabilities_path": {"$ref": "#/$defs/path"}, "capabilities_file_sha256": {"$ref": "#/$defs/hex"}, "profiles_sha256": {"$ref": "#/$defs/hex"}, "official_index_digest": {"$ref": "#/$defs/hex"}, "official_index_path": {"$ref": "#/$defs/path"}, "official_index_file_sha256": {"$ref": "#/$defs/hex"}, "package_index_sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/indexSource"}}, "imagebuilder_url": {"type": "string", "pattern": "^https://"}, "imagebuilder_filename": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*\\.tar\\.(zst|xz|gz)$"}, "imagebuilder_sha256": {"$ref": "#/$defs/hex"}}},
+    "apk": {"type": "object", "additionalProperties": false, "required": ["path", "status_file", "sha256", "package", "architecture", "version", "dependencies"], "properties": {"path": {"$ref": "#/$defs/path"}, "status_file": {"$ref": "#/$defs/path"}, "sha256": {"$ref": "#/$defs/hex"}, "package": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+_.@-]*$"}, "architecture": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}, "dependencies": {"type": "array", "items": {"type": "string", "minLength": 1}}}},
+    "provider": {"type": "object", "additionalProperties": false, "required": ["provider", "repository", "rule_version", "release_id", "release_tag", "evidence_digest", "status_path", "assets", "apks"], "properties": {"provider": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"}, "repository": {"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"}, "rule_version": {"type": "integer", "minimum": 1}, "release_id": {"type": "integer", "minimum": 1}, "release_tag": {"type": "string", "minLength": 1}, "evidence_digest": {"$ref": "#/$defs/hex"}, "status_path": {"$ref": "#/$defs/path"}, "assets": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["asset_id", "name", "url", "sha256"], "properties": {"asset_id": {"type": "integer", "minimum": 1}, "name": {"type": "string", "minLength": 1}, "url": {"type": "string", "pattern": "^https://github\\.com/"}, "sha256": {"$ref": "#/$defs/hex"}}}}, "apks": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/apk"}}}},
+    "build": {"type": "object", "additionalProperties": false, "required": ["repository", "git_commit_sha", "workflow", "rootfs_size_mib", "packages_path", "packages_sha256", "base_packages", "files_path", "files_digest", "apk_tools_version", "config_digest"], "properties": {"repository": {"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"}, "git_commit_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"}, "workflow": {"const": ".github/workflows/build.yml"}, "rootfs_size_mib": {"type": "integer", "minimum": 64, "maximum": 1048576}, "packages_path": {"$ref": "#/$defs/path"}, "packages_sha256": {"$ref": "#/$defs/hex"}, "base_packages": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^-?[A-Za-z0-9][A-Za-z0-9+_.@-]*$"}}, "files_path": {"$ref": "#/$defs/path"}, "files_digest": {"$ref": "#/$defs/hex"}, "apk_tools_version": {"type": "string", "minLength": 1}, "config_digest": {"$ref": "#/$defs/hex"}}},
+    "safety": {"type": "object", "additionalProperties": false, "required": ["strict_mode", "build_allowed", "compatibility_validated", "flash_ready"], "properties": {"strict_mode": {"const": true}, "build_allowed": {"const": true}, "compatibility_validated": {"type": "boolean"}, "flash_ready": {"const": false}}}
+  }
+}

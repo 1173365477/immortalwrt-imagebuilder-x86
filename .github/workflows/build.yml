@@ -3,62 +3,41 @@ name: Build ImmortalWrt x86_64 firmware
 on:
   workflow_dispatch:
     inputs:
-      immortalwrt_version:
-        description: latest stable release or exact version (e.g. 25.12.2)
-        required: true
-        default: latest
+      request_id:
+        description: Immutable request identifier
+        required: false
         type: string
-      report_path:
-        description: Path to complete owut check output
-        required: true
-        default: reports/current-system.txt
+      snapshot_ref:
+        description: Repository evidence directory (evidence/requests/<request-id>)
+        required: false
         type: string
-      include_openclash:
-        description: Include official OpenClash release APK
-        required: true
-        default: true
-        type: boolean
-      openclash_version:
-        description: OpenClash release version
-        required: true
-        default: 0.48.002
+      target_version:
+        description: Frozen target version (must match build-input-v1.json)
+        required: false
         type: string
-      include_nikki:
-        description: Include Nikki only when its release declares target-series x86_64 APK compatibility
-        required: true
-        default: true
-        type: boolean
-      include_lucky:
-        description: Include Lucky only when its release declares target-series x86_64 APK compatibility
-        required: true
-        default: true
-        type: boolean
-      rootfs_size:
-        description: Root filesystem partition size in MiB
-        required: true
-        default: "8192"
-        type: string
-      create_release:
-        description: Publish the result as a GitHub Release
-        required: true
-        default: false
-        type: boolean
       strict_mode:
-        description: Stop when any unresolved missing package remains
-        required: true
+        description: Analysis compatibility flag; false never bypasses the immutable build gate
+        required: false
         default: true
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: smart-upgrade-${{ inputs.request_id || github.run_id }}
+  cancel-in-progress: false
 
 jobs:
-  analyze-resolve-validate-build:
+  immutable-validate-build:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - name: Check out repository
+      - name: Check out the exact workflow commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -66,126 +45,97 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install build dependencies
+      - name: Install verifier dependencies
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes jq zstd
           python -m pip install --requirement requirements.txt
 
-      - name: Resolve stable target version
-        id: release
+      - name: Reject legacy-only or mutable requests
         env:
-          REQUESTED_VERSION: ${{ inputs.immortalwrt_version }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          SNAPSHOT_REF: ${{ inputs.snapshot_ref }}
+          TARGET_VERSION: ${{ inputs.target_version }}
         run: |
           set -euo pipefail
-          python scripts/resolve_version.py --version "$REQUESTED_VERSION"
-          version="$(cat generated/resolved-version.txt)"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Resolved ImmortalWrt version: $version"
+          [[ -n "$REQUEST_ID" && "$REQUEST_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || {
+            echo "::error::request_id is required. Legacy reports must first use analyze.yml."; exit 2;
+          }
+          [[ "$SNAPSHOT_REF" == "evidence/requests/$REQUEST_ID" ]] || {
+            echo "::error::snapshot_ref must be the immutable repository path for request_id."; exit 2;
+          }
+          [[ -n "$TARGET_VERSION" ]] || { echo "::error::target_version is required."; exit 2; }
+          [[ -f "$SNAPSHOT_REF/build-input-v1.json" ]] || {
+            echo "::error::Missing frozen build-input-v1.json."; exit 2;
+          }
+          [[ "$(jq -r '.request_id' "$SNAPSHOT_REF/build-input-v1.json")" == "$REQUEST_ID" ]]
+          [[ "$(jq -r '.target.version' "$SNAPSHOT_REF/build-input-v1.json")" == "$TARGET_VERSION" ]]
 
-      - name: Analyze
+      - name: Install pinned apk-tools comparator
         env:
-          REPORT_PATH: ${{ inputs.report_path }}
+          ALPINE_ROOTFS_VERSION: "3.23.8"
+          ALPINE_ROOTFS_SHA256: "56e2810205c17a5dff78cdd7b2c2af4ccdef16f18d765d5bb0f527438b136676"
         run: |
           set -euo pipefail
-          [[ "$REPORT_PATH" != /* && "$REPORT_PATH" != *..* ]] || { echo "Unsafe report_path"; exit 2; }
-          [[ -f "$REPORT_PATH" ]] || { echo "Missing report: $REPORT_PATH"; exit 2; }
-          args=(--report "$REPORT_PATH" --output generated/system-analysis.json)
-          [[ -f reports/installed-packages.txt ]] && args+=(--installed reports/installed-packages.txt)
-          [[ -f reports/top-level-packages.txt ]] && args+=(--top-level reports/top-level-packages.txt)
-          python scripts/parse-owut-report.py "${args[@]}"
+          archive="$RUNNER_TEMP/alpine-minirootfs-${ALPINE_ROOTFS_VERSION}-x86_64.tar.gz"
+          root="$RUNNER_TEMP/alpine-root"
+          curl -fL --retry 3 --proto '=https' \
+            -o "$archive" \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-${ALPINE_ROOTFS_VERSION}-x86_64.tar.gz"
+          printf '%s  %s\n' "$ALPINE_ROOTFS_SHA256" "$archive" | sha256sum -c -
+          mkdir -p "$root" "$RUNNER_TEMP/apk-bin" "$RUNNER_TEMP/thirdparty-temp"
+          sudo tar -xzf "$archive" -C "$root"
+          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$root/host-apk"
+          ln -s "$GITHUB_WORKSPACE/scripts/apk-chroot-wrapper.sh" "$RUNNER_TEMP/apk-bin/apk"
+          echo "$RUNNER_TEMP/apk-bin" >> "$GITHUB_PATH"
+          {
+            echo "APK_CHROOT_ROOT=$root"
+            echo "APK_CHROOT_ALLOWED_ROOTS=$RUNNER_TEMP/thirdparty-temp:$GITHUB_WORKSPACE"
+            echo "TMPDIR=$RUNNER_TEMP/thirdparty-temp"
+          } >> "$GITHUB_ENV"
+          APK_CHROOT_ROOT="$root" APK_CHROOT_ALLOWED_ROOTS="$RUNNER_TEMP/thirdparty-temp:$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/apk-bin/apk" --version
+          [[ "$(APK_CHROOT_ROOT="$root" APK_CHROOT_ALLOWED_ROOTS="$RUNNER_TEMP/thirdparty-temp:$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/apk-bin/apk" version -t 2.0 3.0)" == '<' ]]
 
-      - name: Resolve
+      - name: Verify immutable evidence before build
+        id: evidence
         env:
-          INCLUDE_OPENCLASH: ${{ inputs.include_openclash }}
-          INCLUDE_NIKKI: ${{ inputs.include_nikki }}
-          INCLUDE_LUCKY: ${{ inputs.include_lucky }}
+          BUILD_INPUT: ${{ inputs.snapshot_ref }}/build-input-v1.json
         run: |
           set -euo pipefail
-          python scripts/resolve-packages.py \
-            --include-openclash "$INCLUDE_OPENCLASH" \
-            --include-nikki "$INCLUDE_NIKKI" \
-            --include-lucky "$INCLUDE_LUCKY"
+          python scripts/verify-build-input.py \
+            --input "$BUILD_INPUT" --repo-root . \
+            --repository "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" \
+            --stage "$RUNNER_TEMP/preflight" --output generated/verified-build-context.json \
+            --offline-recheck
+          echo "digest=$(jq -r '.build_input_digest' generated/verified-build-context.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Validate
+      - name: Build from verified immutable bytes
         env:
-          VERSION: ${{ steps.release.outputs.version }}
-          STRICT_MODE: ${{ inputs.strict_mode }}
-        run: |
-          set -euo pipefail
-          args=(--version "$VERSION" --online)
-          [[ "$STRICT_MODE" == "true" ]] && args+=(--strict)
-          if ! python scripts/validate-manifest.py "${args[@]}"; then
-            echo "::error::Manifest validation failed. Read generated/migration-report.md in the artifact."
-            exit 1
-          fi
-          if [[ "$STRICT_MODE" != "true" && -s generated/packages-missing.txt ]]; then
-            echo "::warning title=MIGRATION WARNING::Building with unresolved packages; review migration-report.md before use."
-          fi
-
-      - name: Fetch and verify third-party APKs
-        id: thirdparty
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          OPENCLASH_VERSION: ${{ inputs.openclash_version }}
-          VERSION: ${{ steps.release.outputs.version }}
-          STRICT_MODE: ${{ inputs.strict_mode }}
-        run: |
-          set -euo pipefail
-          args=(--version "$VERSION" --openclash-version "$OPENCLASH_VERSION")
-          [[ "$STRICT_MODE" == "true" ]] && args+=(--strict)
-          python scripts/fetch-thirdparty.py "${args[@]}"
-          if jq -e 'to_entries | any(.value.status == "unresolved" or .value.status == "incompatible")' \
-            generated/thirdparty-status.json >/dev/null; then
-            echo "suffix=-degraded" >> "$GITHUB_OUTPUT"
-          else
-            echo "suffix=" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build
-        env:
-          IMMORTALWRT_VERSION: ${{ steps.release.outputs.version }}
-          ROOTFS_SIZE: ${{ inputs.rootfs_size }}
-          PROFILE: generic
-          STRICT_MODE: ${{ inputs.strict_mode }}
+          BUILD_INPUT: ${{ inputs.snapshot_ref }}/build-input-v1.json
+          TRUSTED_REPOSITORY: ${{ github.repository }}
+          TRUSTED_COMMIT: ${{ github.sha }}
         run: scripts/build-image.sh
 
-      - name: Validate Artifact safety
+      - name: Validate artifact safety
         id: artifact_safety
         if: always()
-        run: python scripts/validate-artifacts.py --path generated
+        env:
+          SNAPSHOT_REF: ${{ inputs.snapshot_ref }}
+        run: |
+          args=(--path generated/firmware)
+          [[ -d "$SNAPSHOT_REF" ]] && args+=(--path "$SNAPSHOT_REF")
+          python scripts/validate-artifacts.py "${args[@]}"
 
-      - name: Upload firmware and migration evidence
-        if: ${{ always() && steps.artifact_safety.outcome == 'success' }}
+      - name: Upload firmware and provenance
+        if: ${{ success() && steps.artifact_safety.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
-          name: immortalwrt-${{ steps.release.outputs.version || 'unresolved' }}-x86-64-generic-${{ github.run_number }}${{ steps.thirdparty.outputs.suffix }}
+          name: immutable-${{ inputs.request_id }}-${{ steps.evidence.outputs.digest }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 14
           path: |
             generated/firmware/
-            generated/packages-official.txt
-            generated/packages-thirdparty.txt
-            generated/packages-missing.txt
-            generated/packages-skipped.txt
-            generated/packages-replaced.txt
-            generated/package-decisions.json
-            generated/release-capabilities.json
-            generated/official-package-index.json
-            generated/thirdparty-status.json
-            generated/compatibility-report.md
-            generated/resolved-version.txt
-
-      - name: Create GitHub Release
-        if: ${{ success() && inputs.create_release }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.release.outputs.version }}
-        run: |
-          set -euo pipefail
-          tag="firmware-${VERSION}-${GITHUB_RUN_NUMBER}"
-          gh release create "$tag" generated/firmware/* \
-            --title "ImmortalWrt ${VERSION} x86_64 build ${GITHUB_RUN_NUMBER}" \
-            --notes-file generated/migration-report.md
-
+            ${{ inputs.snapshot_ref }}/

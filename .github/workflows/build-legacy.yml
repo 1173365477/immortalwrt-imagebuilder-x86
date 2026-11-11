@@ -1,0 +1,63 @@
+name: Legacy build request compatibility
+
+on:
+  workflow_dispatch:
+    inputs:
+      immortalwrt_version:
+        description: Legacy analysis target (does not authorize ImageBuilder)
+        required: true
+        default: latest
+        type: string
+      report_path:
+        description: Legacy owut report path
+        required: true
+        default: reports/current-system.txt
+        type: string
+      include_openclash:
+        description: Legacy analysis input
+        required: true
+        default: true
+        type: boolean
+      openclash_version:
+        description: Legacy analysis input
+        required: true
+        default: 0.48.002
+        type: string
+      include_nikki:
+        description: Legacy analysis input
+        required: true
+        default: true
+        type: boolean
+      include_lucky:
+        description: Legacy analysis input
+        required: true
+        default: true
+        type: boolean
+      rootfs_size:
+        description: Legacy analysis input
+        required: true
+        default: "8192"
+        type: string
+      create_release:
+        description: Deprecated; T13 build workflow is read-only
+        required: true
+        default: false
+        type: boolean
+      strict_mode:
+        description: Legacy analysis policy only
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  migration-guidance:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Explain immutable build migration
+        run: |
+          echo "::error::Legacy build parameters cannot authorize ImageBuilder."
+          echo "Run Analyze migration report, create a reviewed build-input-v1.json, then use the immutable Build workflow."
+          exit 2
