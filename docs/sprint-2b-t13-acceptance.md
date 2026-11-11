@@ -109,6 +109,19 @@ alternate base-package file. The negative test passes self-consistent modified
 index, capabilities, Plan, package-list, config and Build Input digests through
 the real build entry and proves the gate stops before network or make.
 
-Post-remediation focused local result: 42 passed, 1 real-apk CI test skipped.
-The full Linux count and final CI links are recorded after the final remote HEAD
-completes both Push and PR workflows.
+Post-remediation focused local result: 54 passed, 1 real-apk CI test skipped.
+
+Final Linux validation at remediation HEAD
+`311f8ea0bd3b30505f555d014fbe3e583a382ea4`:
+
+- Push CI [42746129555](https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/42746129555) — SUCCESS.
+- PR CI [42746134953](https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/42746134953) — SUCCESS.
+- Ordinary suite: 190 passed, 1 real-apk case skipped; the separate pinned
+  Alpine 3.23.8 / apk-tools 3.0.9 integration then passed that case.
+- actionlint 1.7.7, ShellCheck, Python/YAML/JSON syntax and schemas, official
+  25.12.2 index validation, target-version mismatch rejection and strict
+  unresolved-package rejection passed.
+
+This record is superseded only by the documentation-only final evidence commit
+and its matching successful Push/PR runs. PR #23 remains Draft; Issue #15
+remains open. No firmware build or router operation was performed.
