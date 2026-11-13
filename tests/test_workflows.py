@@ -38,6 +38,8 @@ def test_existing_build_inputs_and_artifact_names_remain_compatible():
 def test_ci_runs_actionlint_and_all_scanner_shellcheck_targets():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     assert "actionlint" in text
+    assert "compileall -q gateway scripts" in text
+    assert "Gateway security" in text
     assert "scripts/smart-upgrade-agent.sh scripts/smart-upgrade-storage.sh" in text
     assert "scripts/apk-chroot-wrapper.sh" in text
     assert "apk adbdump --format json" in text
