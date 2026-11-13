@@ -47,7 +47,7 @@ whose identity and returned evidence must still be verified.
 |---|---|---|---|---|
 | Anonymous Gateway call | Missing credentials create or enumerate tasks. | Protected routes require an Authorization bearer credential; use a uniform external authentication error. | POST/GET without Authorization returns `AUTH_REQUIRED`. | Availability endpoints may remain public only if explicitly designated later. |
 | Forged device identity | Client JSON or header claims another `device_id`. | Device identity is derived only from a server-side credential record; request models reject extra fields. | Submit `device_id` in JSON and query another device's request. | A stolen valid device credential acts as that device until revoked. |
-| Gateway token leakage | Token in URL, logs, tracebacks, or database task rows permits impersonation. | Authorization is header-only; store salted PBKDF2 hashes, redact logs, never serialize credentials in task responses. | Send a canary token through failures and assert it is absent from logs and DB task rows. | Process memory contains a presented token briefly. Host hardening remains required. |
+| Gateway token leakage | Token in URL, logs, tracebacks, or database task rows permits impersonation. | Authorization is header-only; store salted scrypt hashes, redact logs, never serialize credentials in task responses. | Send a canary token through failures and assert it is absent from logs and DB task rows. | Process memory contains a presented token briefly. Host hardening remains required. |
 | Replay | Captured POST creates repeated builds. | Persistent `(device_id, request_id)` uniqueness and immutable identity comparison make exact repeats idempotent. | Ten concurrent identical POSTs create one task. | T14-A creates no external build; T14-B needs dispatch-side idempotency and recovery. |
 | Request parameter tampering | Digest, commit, repository, URL, package list, or status is changed to authorize other evidence. | Strict request model allows only four immutable identity fields plus `request_id`; repository is server-fixed; no URL, package list, status, or device fields exist. | Extra URL/path/status/repository and malformed digest/ref tests fail. | A syntactically valid request is not evidence of trust. |
 | `request_id` collision | Same device reuses an ID for different evidence and overwrites history. | Unique constraint plus transactionally compared identity fields; conflicts return `IDEMPOTENCY_CONFLICT`. | Same ID with different digest, commit, repository, or build-input ID returns 409. | Different devices have independent namespaces by design. |
@@ -73,7 +73,7 @@ whose identity and returned evidence must still be verified.
 
 Each router receives a random high-entropy Gateway bearer token over an
 out-of-band enrollment channel. The Gateway stores only a credential ID,
-device ID, random salt, PBKDF2-HMAC-SHA256 hash, expiry, and revocation time.
+device ID, random salt, scrypt hash, expiry, and revocation time.
 Rotation creates a new credential, overlaps it briefly if policy permits, and
 then revokes the old credential. Loss recovery revokes every credential for the
 device before issuing a replacement. Production requires HTTPS; the app refuses
