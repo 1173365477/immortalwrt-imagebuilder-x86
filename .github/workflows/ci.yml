@@ -44,7 +44,7 @@ jobs:
       - name: Validate YAML and Python syntax
         run: |
           set -euo pipefail
-          python -m py_compile scripts/*.py
+          python -m compileall -q gateway scripts
           python - <<'PY'
           from pathlib import Path
           import yaml
@@ -60,7 +60,7 @@ jobs:
           shellcheck -x scripts/build-image.sh scripts/apk-chroot-wrapper.sh files/etc/uci-defaults/99-install-thirdparty
           shellcheck -s sh scripts/smart-upgrade-agent.sh scripts/smart-upgrade-storage.sh
 
-      - name: Run unit and future-release fixture tests
+      - name: Run unit, Gateway security, and future-release fixture tests
         run: pytest -q
 
       - name: Exercise pinned real apk-tools version semantics

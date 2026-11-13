@@ -417,6 +417,7 @@ def verify_build_input(
     context = {
         "schema_version": "1.0.0", "request_id": build_input["request_id"],
         "build_input_id": build_input["build_input_id"], "build_input_digest": digest,
+        "repository": expected_repository,
         "snapshot_id": snapshot["snapshot_id"], "snapshot_digest": snap_digest,
         "plan_id": plan["plan_id"], "plan_digest": plan_digest,
         "target": target, "release": release, "build": build,
