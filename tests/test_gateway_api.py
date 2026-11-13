@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,20 @@ class ExplodingVerifier:
     def verify(self, request):
         del request
         raise RuntimeError(self.secret)
+
+
+class BlockingVerifier:
+    def __init__(self):
+        self.release = threading.Event()
+        self.lock = threading.Lock()
+        self.calls = 0
+
+    def verify(self, request):
+        del request
+        with self.lock:
+            self.calls += 1
+        self.release.wait(timeout=2)
+        return EvidenceVerdict(True)
 
 
 def payload(request_id: str = "request-001", **changes):
@@ -322,6 +337,26 @@ def test_validation_timeout_fails_closed(tmp_path):
     assert result.json()["status"] == "FAILED"
     assert result.json()["failure_code"] == "EVIDENCE_UNVERIFIED"
     assert result.json()["dispatch_allowed"] is False
+
+
+def test_timed_out_workers_continue_but_validation_queue_is_bounded(tmp_path):
+    verifier = BlockingVerifier()
+    _, _, client, token, _ = gateway(
+        tmp_path, verifier=verifier, validation_timeout_seconds=0.02,
+        validation_workers=2,
+    )
+    try:
+        first = client.post("/builds", json=payload("one"), headers=auth(token))
+        second = client.post("/builds", json=payload("two"), headers=auth(token))
+        third = client.post("/builds", json=payload("three"), headers=auth(token))
+        assert [first.json()["status"], second.json()["status"], third.json()["status"]] == [
+            "FAILED", "FAILED", "FAILED"
+        ]
+        # wait_for cannot cancel the two running threads. Their slots remain held,
+        # so the third request times out before it can submit another worker.
+        assert verifier.calls == 2
+    finally:
+        verifier.release.set()
 
 
 def test_expired_task_identifier_remains_reserved(tmp_path):

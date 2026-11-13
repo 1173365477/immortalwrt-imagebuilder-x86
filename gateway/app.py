@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,6 +37,7 @@ class GatewaySettings:
     task_quota: int = 100
     task_ttl_seconds: int = 7 * 24 * 60 * 60
     validation_timeout_seconds: float = 30.0
+    validation_workers: int = 4
     sqlite_busy_timeout_ms: int = 1_000
 
     @classmethod
@@ -149,17 +152,58 @@ def create_app(
     if recovered:
         audit("startup_recovery", status=TaskStatus.FAILED.value)
 
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        yield
+        application.state.validation_executor.shutdown(wait=False, cancel_futures=True)
+
     app = FastAPI(
         title="OpenWrt Smart Upgrade Build Gateway",
         version="0.1.0-t14a",
         docs_url=None,
         redoc_url=None,
         openapi_url="/openapi.json",
+        lifespan=lifespan,
     )
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes)
     app.state.settings = settings
     app.state.store = store
     app.state.verifier = verifier
+    app.state.validation_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=settings.validation_workers,
+        thread_name_prefix="gateway-evidence",
+    )
+    validation_slots = asyncio.Semaphore(settings.validation_workers)
+
+    async def verify_with_bounded_workers(build_request: BuildRequest):
+        """Keep a slot occupied until a timed-out worker actually terminates."""
+        await asyncio.wait_for(
+            validation_slots.acquire(), timeout=settings.validation_timeout_seconds
+        )
+        loop = asyncio.get_running_loop()
+        try:
+            future = loop.run_in_executor(
+                app.state.validation_executor, verifier.verify, build_request
+            )
+        except BaseException:
+            validation_slots.release()
+            raise
+        release_in_callback = False
+
+        def release_slot(_future: object) -> None:
+            loop.call_soon_threadsafe(validation_slots.release)
+
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(future), timeout=settings.validation_timeout_seconds
+            )
+        except BaseException:
+            release_in_callback = True
+            future.add_done_callback(release_slot)
+            raise
+        finally:
+            if not release_in_callback:
+                validation_slots.release()
 
     @app.exception_handler(GatewayError)
     async def gateway_error_handler(request: Request, exc: GatewayError) -> JSONResponse:
@@ -253,10 +297,7 @@ def create_app(
         if created:
             task = store.transition_task(task.internal_task_id, TaskStatus.VALIDATING)
             try:
-                verdict = await asyncio.wait_for(
-                    asyncio.to_thread(verifier.verify, build_request),
-                    timeout=settings.validation_timeout_seconds,
-                )
+                verdict = await verify_with_bounded_workers(build_request)
             except TimeoutError:
                 task = store.transition_task(
                     task.internal_task_id,

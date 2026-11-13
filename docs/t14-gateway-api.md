@@ -246,7 +246,19 @@ requests cannot select another repository or installation.
 3. derive `evidence/requests/<validated-request-id>/build-input-v1.json`
    internally;
 4. invoke `scripts/verify-build-input.py` with the fixed repository and commit;
-5. treat any missing evidence, timeout, nonzero exit, or mismatch as blocked.
+5. before deleting the temporary output, strictly parse `context.json`, reject
+   duplicate keys, and bind `request_id`, `build_input_id`,
+   `build_input_digest`, `runtime_commit_sha`, and `repository` to the request
+   and server configuration; and
+6. treat any missing, malformed, oversized, incomplete, timed-out, nonzero, or
+   mismatched result as untrusted.
+
+A zero exit status alone is never a trust result. Python cannot forcibly cancel
+a verifier thread that is already running, so the Gateway uses a dedicated,
+bounded validation executor. A timed-out call retains its slot until the worker
+actually exits; later calls cannot create an unbounded validation queue. The
+subprocess adapter also enforces a child-process timeout. Future trusted
+adapters must retain a finite internal timeout and must not spawn detached work.
 
 T14-B must add immutable evidence retrieval, GitHub App token acquisition,
 dispatch intent, `request_id -> run_id -> run_attempt`, run polling, artifact

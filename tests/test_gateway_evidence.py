@@ -16,12 +16,29 @@ REPOSITORY = "1173365477/immortalwrt-imagebuilder-x86"
 DIGEST = "a" * 64
 
 
-def make_checkout(tmp_path: Path, verifier_exit: int = 0):
+def make_checkout(tmp_path: Path, verifier_exit: int = 0, script: str | None = None):
     checkout = tmp_path / "checkout"
     (checkout / "scripts").mkdir(parents=True)
-    (checkout / "scripts/verify-build-input.py").write_text(
-        "import sys\nraise SystemExit(%d)\n" % verifier_exit
-    )
+    if script is None:
+        script = f"""\
+import json
+import sys
+output = sys.argv[sys.argv.index('--output') + 1]
+commit = sys.argv[sys.argv.index('--commit') + 1]
+repository = sys.argv[sys.argv.index('--repository') + 1]
+context = {{
+    'schema_version': '1.0.0',
+    'request_id': 'request-001',
+    'build_input_id': 'urn:sha256:{DIGEST}',
+    'build_input_digest': '{DIGEST}',
+    'runtime_commit_sha': commit,
+    'repository': repository,
+    'flash_ready': False,
+}}
+open(output, 'w', encoding='utf-8').write(json.dumps(context))
+raise SystemExit({verifier_exit})
+"""
+    (checkout / "scripts/verify-build-input.py").write_text(script)
     (checkout / "evidence/requests/request-001").mkdir(parents=True)
     (checkout / "evidence/requests/request-001/build-input-v1.json").write_text("{}")
     subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
@@ -35,11 +52,11 @@ def make_checkout(tmp_path: Path, verifier_exit: int = 0):
     return checkout, commit
 
 
-def request(commit: str):
+def request(commit: str, digest: str = DIGEST):
     return BuildRequest(
         request_id="request-001",
-        build_input_id=f"urn:sha256:{DIGEST}",
-        build_input_digest=DIGEST,
+        build_input_id=f"urn:sha256:{digest}",
+        build_input_digest=digest,
         repository=REPOSITORY,
         evidence_commit_sha=commit,
     )
@@ -59,6 +76,78 @@ def test_controlled_t13_adapter_binds_exact_checkout_commit_and_path(tmp_path):
     wrong = verifier.verify(request("b" * 40))
     assert wrong.trusted is False
     assert wrong.failure_code == ErrorCode.EVIDENCE_NOT_FOUND
+
+
+def test_controlled_t13_adapter_rejects_request_digest_not_verified_by_t13(tmp_path):
+    checkout, commit = make_checkout(tmp_path)
+    verdict = SubprocessT13Verifier(checkout, REPOSITORY).verify(request(commit, "c" * 64))
+    assert verdict.trusted is False
+    assert verdict.failure_code == ErrorCode.EVIDENCE_UNVERIFIED
+
+
+def test_controlled_t13_adapter_rejects_wrong_context_build_input_id(tmp_path):
+    checkout, commit = make_checkout(tmp_path)
+    script = checkout / "scripts/verify-build-input.py"
+    script.write_text(script.read_text().replace(f"urn:sha256:{DIGEST}", f"urn:sha256:{'d' * 64}"))
+    verdict = SubprocessT13Verifier(checkout, REPOSITORY).verify(request(commit))
+    assert verdict.trusted is False
+    assert verdict.failure_code == ErrorCode.EVIDENCE_UNVERIFIED
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("'request_id': 'request-001'", "'request_id': 'request-999'"),
+        ("'repository': repository", "'repository': 'attacker/firmware'"),
+    ],
+    ids=["request-id", "repository"],
+)
+def test_controlled_t13_adapter_rejects_other_context_identity_mismatch(tmp_path, old, new):
+    checkout, commit = make_checkout(tmp_path)
+    script = checkout / "scripts/verify-build-input.py"
+    script.write_text(script.read_text().replace(old, new))
+    verdict = SubprocessT13Verifier(checkout, REPOSITORY).verify(request(commit))
+    assert verdict.trusted is False
+    assert verdict.failure_code == ErrorCode.EVIDENCE_UNVERIFIED
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "raise SystemExit(0)\n",
+        "import sys\nopen(sys.argv[sys.argv.index('--output')+1], 'w').write('{')\n",
+        "import json,sys\nopen(sys.argv[sys.argv.index('--output')+1], 'w').write(json.dumps({'schema_version':'1.0.0'}))\n",
+        f"""import json,sys
+p=sys.argv[sys.argv.index('--output')+1]
+json.dump({{'schema_version':'1.0.0','request_id':'request-001','build_input_id':'urn:sha256:{DIGEST}','build_input_digest':'{DIGEST}','runtime_commit_sha':'{'d' * 40}','repository':'{REPOSITORY}','flash_ready':False}},open(p,'w'))
+""",
+        f"""import sys
+p=sys.argv[sys.argv.index('--output')+1]
+open(p,'w').write('{{"schema_version":"1.0.0","request_id":"request-001","request_id":"request-001","build_input_id":"urn:sha256:{DIGEST}","build_input_digest":"{DIGEST}","runtime_commit_sha":"{'b' * 40}","repository":"{REPOSITORY}","flash_ready":false}}')
+""",
+    ],
+    ids=["missing", "invalid-json", "missing-fields", "commit-mismatch", "duplicate-key"],
+)
+def test_controlled_t13_adapter_rejects_invalid_or_unbound_context(tmp_path, script):
+    checkout, commit = make_checkout(tmp_path, script=script)
+    verdict = SubprocessT13Verifier(checkout, REPOSITORY).verify(request(commit))
+    assert verdict.trusted is False
+    assert verdict.failure_code == ErrorCode.EVIDENCE_UNVERIFIED
+
+
+def test_controlled_t13_adapter_rejects_timeout_and_execution_error(tmp_path, monkeypatch):
+    checkout, commit = make_checkout(tmp_path, script="import time\ntime.sleep(2)\n")
+    verdict = SubprocessT13Verifier(checkout, REPOSITORY, timeout_seconds=0.01).verify(request(commit))
+    assert verdict.trusted is False
+    assert verdict.failure_code == ErrorCode.EVIDENCE_UNVERIFIED
+
+    def fail(*args, **kwargs):
+        raise OSError("canary path must not escape")
+
+    monkeypatch.setattr(subprocess, "run", fail)
+    verdict = SubprocessT13Verifier(checkout, REPOSITORY).verify(request(commit))
+    assert verdict.trusted is False
+    assert verdict.failure_code == ErrorCode.EVIDENCE_UNVERIFIED
 
 
 def test_controlled_t13_adapter_rejects_symlink_and_verifier_failure(tmp_path):

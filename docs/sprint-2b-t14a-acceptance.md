@@ -22,7 +22,7 @@ review.
 | Per-device authentication | PASS | Random bearer credentials are stored only as salted scrypt hashes; expiry, rotation, single-credential revocation, and device-wide revocation are supported. |
 | HTTPS production prerequisite | PASS | HTTP is rejected by default; proxy forwarding headers are not trusted to override the observed scheme. |
 | Fixed immutable request identity | PASS | Strict Pydantic models bind build input ID to digest and accept only the configured repository and a full 40-character commit. |
-| T13 verifier reuse | PASS | A controlled-checkout adapter calls `verify-build-input.py`; the production-safe default rejects all evidence when no trusted adapter is configured. |
+| T13 verifier reuse | PASS | A controlled-checkout adapter calls `verify-build-input.py`, then strictly binds the returned context identity to the request; the production-safe default rejects all evidence when no trusted adapter is configured. |
 | Persistent idempotency | PASS | SQLite unique constraint plus `BEGIN IMMEDIATE` makes `(device_id, request_id)` atomic across processes using the same database. Immutable-field conflicts return 409. |
 | State machine | PASS | Legal T14-A transitions are enforced and persisted with a transition journal. Restarted incomplete validations fail closed. |
 | Device isolation | PASS | Device identity comes only from the authenticated credential and scopes all task reads and idempotency keys. |
@@ -42,6 +42,12 @@ concurrent replay; restart persistence; illegal and concurrent transitions;
 database locks, corruption, write rollback, and restart recovery; persistent
 rate limiting and quota; request-size and validation timeouts; credential and
 log redaction; and controlled T13 adapter success and failure.
+
+Independent-review remediation additionally covers a real T13 Build Input with
+matching and forged digests; missing, invalid, incomplete, duplicate-key, and
+commit-mismatched context output; wrong Build Input ID; nonzero exit;
+subprocess timeout and execution failure; and bounded behavior while timed-out
+Python workers continue running.
 
 The existing T13 and earlier Sprint suites remain part of the unchanged CI
 test command. CI also compiles the `gateway` package and scripts before pytest.
@@ -84,6 +90,10 @@ that can make `flash_ready=true`.
   polling, artifact retrieval, or provenance query exists yet.
 - The default evidence verifier intentionally blocks every request. Deployment
   must explicitly supply a trusted evidence adapter.
+- Python cannot forcibly cancel a running verifier thread. T14-A bounds this
+  residual risk with a dedicated worker pool and retains a slot until the
+  underlying call exits. The subprocess adapter has a finite child timeout;
+  future adapters must provide the same termination guarantee.
 - There is no LuCI or real-router integration.
 - Credential issuance is an offline administrator operation; recovery means
   revoking the old credential and issuing a new one over a separate trusted

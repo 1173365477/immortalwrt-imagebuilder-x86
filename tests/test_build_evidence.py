@@ -13,6 +13,8 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from build_evidence import EvidenceError, canonical_digest, sha256_file, tree_digest, verify_build_input
+from gateway.evidence import SubprocessT13Verifier
+from gateway.models import BuildRequest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -229,6 +231,44 @@ def test_build_input_positive_stages_exact_bytes(tmp_path):
     assert result["build_input_id"] == f"urn:sha256:{result['build_input_digest']}"
     assert (stage / "final-packages.txt").read_text() == "curl\n"
     assert tree_digest(stage / "files") == result["staged_files_digest"]
+
+
+def test_gateway_binds_real_t13_context_to_requested_digest(tmp_path, monkeypatch):
+    path, value = frozen_request(tmp_path)
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    shutil.copy2(ROOT / "scripts/verify-build-input.py", scripts / "verify-build-input.py")
+    shutil.copy2(ROOT / "scripts/build_evidence.py", scripts / "build_evidence.py")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Gateway Test"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repo, check=True)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True, capture_output=True, check=True
+    ).stdout.strip()
+    value["build"]["git_commit_sha"] = commit
+    value["build"]["config_digest"] = canonical_digest(value["build"], ("config_digest",))
+    rewrite_input(path, value)
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}:{os.environ['PATH']}")
+
+    verifier = SubprocessT13Verifier(repo, REPOSITORY)
+    valid = BuildRequest(
+        request_id="request-1", build_input_id=value["build_input_id"],
+        build_input_digest=value["digest"], repository=REPOSITORY,
+        evidence_commit_sha=commit,
+    )
+    assert verifier.verify(valid).trusted is True
+
+    wrong_digest = "c" * 64
+    forged = BuildRequest(
+        request_id="request-1", build_input_id=f"urn:sha256:{wrong_digest}",
+        build_input_digest=wrong_digest, repository=REPOSITORY,
+        evidence_commit_sha=commit,
+    )
+    verdict = verifier.verify(forged)
+    assert verdict.trusted is False
 
 
 def test_thirdparty_bytes_metadata_dependencies_and_target_are_bound(tmp_path):
