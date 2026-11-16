@@ -61,12 +61,25 @@ includes request/digest/evidence/code/workflow/ref. States are `PENDING`,
 `DISPATCHING`, `UNKNOWN`, `BOUND`, and `FAILED`. A worker claims an intent
 atomically; another worker cannot dispatch it.
 
-Timeout, connection loss, 429, 5xx, missing run details, or a local failure
-after the external call becomes `UNKNOWN`. Reconciliation accepts only one
+Timeout, connection loss, an ambiguous dispatch response, or a local failure
+after the external call becomes `UNKNOWN`. Dispatch itself is never retried.
+Read-only operations use bounded exponential backoff and `Retry-After` for 429;
+exhaustion preserves the current durable state. Reconciliation accepts only one
 exact candidate. Zero or multiple matches require manual review and never cause
-a blind retry. Startup preserves externally ambiguous states for reconciliation.
+a blind retry. On startup a never-claimed `PENDING` intent may be claimed once;
+an interrupted `DISPATCHING` intent first becomes `UNKNOWN`. Unknown and bound
+runs are then reconciled without creating another workflow run.
 
 ## Run, artifact, and log trust
+
+The REST mapping is pinned to GitHub API version `2026-03-10`. Dispatch accepts
+the documented `200` response with `workflow_run_id`; the compatibility path
+also treats an older `204` response as identity-unknown and performs exact
+correlation. The injected transport must send
+`Accept: application/vnd.github+json` and `X-GitHub-Api-Version: 2026-03-10`.
+It must enforce TLS, finite timeouts, bounded bodies, and redirect host policy.
+Those requirements are exercised through a fake transport; no production
+network transport or real dispatch is enabled in this sprint.
 
 GitHub `success` moves a task to `VERIFYING_ARTIFACT`, not `SUCCEEDED`. Artifact
 ZIP inspection rejects traversal, duplicate names, symlinks, special files,
@@ -78,6 +91,11 @@ Snapshot, Plan, run ID, and attempt.
 Project provenance is an internal evidence record, not a GitHub cryptographic
 Artifact Attestation. This implementation does not claim independent signature
 verification. Verified artifacts remain `flash_ready=false`.
+
+Artifact download adapters must return repository, run ID, attempt, expiry, and
+bytes. The Gateway rejects expired or mismatched envelopes before opening the
+ZIP, then applies archive limits and verifies `build-provenance-v2.json` plus
+the firmware bytes. A failed integrity check is terminal `ARTIFACT_FAILED`.
 
 Logs are device-scoped, bounded UTF-8 text produced through a field/line
 allowlist with control characters removed. Raw archives, environment dumps,

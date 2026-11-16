@@ -1,12 +1,14 @@
-# T14-A secure build gateway foundation
+# T14 secure build gateway
 
 ## Status and boundary
 
-T14-A is an authenticated, persistent request registry and evidence-validation
-state machine. It deliberately has no GitHub API client and cannot upload
-evidence, dispatch Actions, report a build as running/succeeded, download an
-artifact, or make firmware flash-ready. T14-B must extend this foundation
-without bypassing the T13 verifier.
+T14-A established the authenticated persistent request registry and evidence
+validation state machine. T14-B adds a production-disabled GitHub REST mapping,
+durable Dispatch Intent, run reconciliation, artifact verification and bounded
+log proxy using injected transports and test substitutes. No production GitHub
+App, key, network transport or evidence admission process is configured, and
+the test suite never dispatches the real workflow. Firmware is never made
+flash-ready.
 
 The implementation uses FastAPI/Pydantic for strict HTTP validation and the
 Python `sqlite3` module for a small single-instance transactional store. API
@@ -21,10 +23,14 @@ gateway/
   app.py          FastAPI routes, HTTPS/body/rate boundaries and safe responses
   database.py     credentials, SQLite schema, transactions and persistent quotas
   evidence.py     default-deny and controlled T13 verifier adapters
+  resolver.py     fixed-repository immutable checkout boundary
+  github.py       GitHub App and versioned REST mapping boundaries
+  service.py      durable dispatch/reconciliation orchestration
+  artifacts.py    bounded ZIP, provenance and firmware verification
   errors.py       stable public error codes
   logging.py      structured allowlist audit logging
   models.py       strict request/response models
-  state.py        server-owned T14-A state machine
+  state.py        server-owned T14-A/T14-B state machine
   main.py         uvicorn entry point
 scripts/
   gateway-credentials.py  offline issue/revoke administrator utility
@@ -163,6 +169,9 @@ SQLite stores:
   and reserved GitHub run fields;
 - `task_transitions`: append-only state transition audit;
 - `rate_limits`: persistent per-device fixed-window counters;
+- `dispatch_intents`: immutable dispatch identity, claim/reconciliation state,
+  run binding, target and evidence digests;
+- `verified_artifacts`: allowlisted metadata only after byte/provenance checks;
 - `gateway_meta`: schema version.
 
 `UNIQUE(device_id, request_id)` is the authoritative idempotency constraint.
@@ -175,8 +184,10 @@ fail closed as `STORAGE_UNAVAILABLE`.
 
 Expired request IDs remain reserved and return `REQUEST_EXPIRED`; expiry never
 silently creates a second logical task. Startup converts interrupted
-`RECEIVED/VALIDATING` records to `FAILED`. T14-B must replace this simple
-fail-closed recovery with GitHub-side reconciliation for dispatch states.
+`RECEIVED/VALIDATING` records to `FAILED`. T14-B additionally claims a
+never-started `DISPATCH_PENDING` intent once, converts interrupted
+`DISPATCHING` to `DISPATCH_UNKNOWN`, and reconciles unknown/bound external work
+without blind dispatch retry.
 
 ## State machine
 
@@ -265,3 +276,35 @@ dispatch intent, `request_id -> run_id -> run_attempt`, run polling, artifact
 and provenance verification, and ambiguous-side-effect recovery. It must not
 reimplement `build_allowed`, rewrite Snapshot/Plan data, accept arbitrary URLs,
 or dispatch before this adapter records a trusted verification result.
+
+## T14-B mock integration contract
+
+T14-B retains the `POST /builds` request body unchanged. Dispatch is enabled
+only by the server-side `GATEWAY_DISPATCH_ENABLED` switch and injected trusted
+adapters. The client cannot select a GitHub installation, token, workflow,
+repository, ref, run, URL, target version, strictness, or task state.
+
+The public task response may additionally contain `trusted_code_commit_sha`,
+`github_run_id`, and `github_run_attempt`. Its state can advance through
+`DISPATCH_PENDING`, `DISPATCHING`, `DISPATCH_UNKNOWN`, `QUEUED`, `RUNNING`,
+`VERIFYING_ARTIFACT`, `SUCCEEDED`, `BUILD_FAILED`, and `ARTIFACT_FAILED`.
+GitHub success alone stops at `VERIFYING_ARTIFACT`; only a verified provenance
+and firmware byte stream can reach `SUCCEEDED`.
+
+`GET /builds/{request_id}/artifacts` returns only allowlisted metadata for an
+already verified artifact: request, filename, recomputed SHA256/size, run ID,
+attempt, `verified=true`, and `flash_ready=false`. It does not expose an
+unverified archive or router filesystem path. `GET /builds/{request_id}/logs`
+returns bounded, control-character-cleaned, redacted lines and a truncation
+flag. Both routes use the authenticated device namespace.
+
+`GET /targets` and `POST /analysis` are not implemented in T14-B. No static or
+hard-coded response is presented as a live resolver. Existing Release Resolver
+and analysis commands remain separate offline interfaces.
+
+The production GitHub transport, App private-key issuer, TLS/reverse-proxy
+deployment, and protected evidence-ref admission process are deployment
+dependencies. The checked-in implementation uses protocols and controlled
+test substitutes; dispatch remains disabled unless an operator supplies all
+dependencies. No route performs flash, reboot, partition, or router
+configuration operations.
