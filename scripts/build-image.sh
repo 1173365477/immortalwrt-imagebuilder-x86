@@ -5,6 +5,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_INPUT="${BUILD_INPUT:-}"
 TRUSTED_REPOSITORY="${TRUSTED_REPOSITORY:-}"
 TRUSTED_COMMIT="${TRUSTED_COMMIT:-}"
+EVIDENCE_COMMIT="${EVIDENCE_COMMIT:-$TRUSTED_COMMIT}"
+WORKFLOW_RUNTIME_SHA="${WORKFLOW_RUNTIME_SHA:-$EVIDENCE_COMMIT}"
 RUN_ID="${GITHUB_RUN_ID:-1}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 
@@ -90,9 +92,10 @@ cp "$PRIMARY" "$REPO_ROOT/generated/firmware/"
 python3 scripts/generate-build-provenance.py \
   --input "$BUILD_INPUT" --repo-root "$REPO_ROOT" \
   --repository "$TRUSTED_REPOSITORY" --commit "$TRUSTED_COMMIT" \
+  --evidence-commit "$EVIDENCE_COMMIT" --runtime-commit "$WORKFLOW_RUNTIME_SHA" \
   --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
   --firmware "$REPO_ROOT/generated/firmware/$EXPECTED_IMAGE" \
-  --output "$REPO_ROOT/generated/firmware/build-provenance-v1.json"
+  --output "$REPO_ROOT/generated/firmware/build-provenance-v2.json"
 (
   cd "$REPO_ROOT/generated/firmware"
   sha256sum "$EXPECTED_IMAGE" > sha256sums

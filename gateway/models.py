@@ -40,6 +40,9 @@ class BuildTaskResponse(BaseModel):
     build_input_digest: str
     repository: str
     evidence_commit_sha: str
+    trusted_code_commit_sha: str | None = None
+    github_run_id: int | None = None
+    github_run_attempt: int | None = None
     created_at: datetime
     updated_at: datetime
     expires_at: datetime
@@ -48,6 +51,28 @@ class BuildTaskResponse(BaseModel):
     dispatch_allowed: Literal[False] = False
     flash_ready: Literal[False] = False
     idempotent_replay: bool = False
+
+
+class ArtifactResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    filename: str
+    sha256: str
+    size_bytes: int
+    github_run_id: int
+    github_run_attempt: int
+    verified: Literal[True] = True
+    flash_ready: Literal[False] = False
+
+
+class LogResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    lines: list[str]
+    truncated: bool
+    flash_ready: Literal[False] = False
 
 
 class ErrorBody(BaseModel):

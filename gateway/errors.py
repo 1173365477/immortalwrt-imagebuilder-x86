@@ -23,6 +23,11 @@ class ErrorCode(StrEnum):
     INTERNAL_ERROR = "INTERNAL_ERROR"
     TLS_REQUIRED = "TLS_REQUIRED"
     REQUEST_TOO_LARGE = "REQUEST_TOO_LARGE"
+    DISPATCH_DISABLED = "DISPATCH_DISABLED"
+    DISPATCH_UNKNOWN = "DISPATCH_UNKNOWN"
+    UPSTREAM_UNAVAILABLE = "UPSTREAM_UNAVAILABLE"
+    RUN_IDENTITY_MISMATCH = "RUN_IDENTITY_MISMATCH"
+    ARTIFACT_UNVERIFIED = "ARTIFACT_UNVERIFIED"
 
 
 PUBLIC_MESSAGES = {
@@ -43,6 +48,11 @@ PUBLIC_MESSAGES = {
     ErrorCode.INTERNAL_ERROR: "The request could not be completed.",
     ErrorCode.TLS_REQUIRED: "HTTPS is required.",
     ErrorCode.REQUEST_TOO_LARGE: "The request body is too large.",
+    ErrorCode.DISPATCH_DISABLED: "Build dispatch is disabled.",
+    ErrorCode.DISPATCH_UNKNOWN: "The dispatch result requires reconciliation.",
+    ErrorCode.UPSTREAM_UNAVAILABLE: "The upstream service is unavailable.",
+    ErrorCode.RUN_IDENTITY_MISMATCH: "The workflow run identity is invalid.",
+    ErrorCode.ARTIFACT_UNVERIFIED: "The build artifact has not been verified.",
 }
 
 

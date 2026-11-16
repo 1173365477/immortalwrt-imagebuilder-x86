@@ -20,6 +20,16 @@ on:
         required: false
         default: true
         type: boolean
+      build_input_digest:
+        description: Frozen Build Input digest supplied by the Gateway
+        required: false
+        type: string
+      trusted_code_commit_sha:
+        description: Reviewed code ancestor bound by the Build Input
+        required: false
+        type: string
+
+run-name: immutable-${{ inputs.request_id }}-${{ inputs.build_input_digest }}
 
 permissions:
   contents: read
@@ -37,6 +47,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
@@ -57,6 +68,8 @@ jobs:
           REQUEST_ID: ${{ inputs.request_id }}
           SNAPSHOT_REF: ${{ inputs.snapshot_ref }}
           TARGET_VERSION: ${{ inputs.target_version }}
+          BUILD_INPUT_DIGEST: ${{ inputs.build_input_digest }}
+          TRUSTED_CODE_COMMIT: ${{ inputs.trusted_code_commit_sha }}
         run: |
           set -euo pipefail
           [[ -n "$REQUEST_ID" && "$REQUEST_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || {
@@ -66,11 +79,21 @@ jobs:
             echo "::error::snapshot_ref must be the immutable repository path for request_id."; exit 2;
           }
           [[ -n "$TARGET_VERSION" ]] || { echo "::error::target_version is required."; exit 2; }
+          [[ "$BUILD_INPUT_DIGEST" =~ ^[a-f0-9]{64}$ ]] || { echo "::error::Invalid Build Input digest."; exit 2; }
+          [[ "$TRUSTED_CODE_COMMIT" =~ ^[a-f0-9]{40}$ ]] || { echo "::error::Invalid trusted code commit."; exit 2; }
           [[ -f "$SNAPSHOT_REF/build-input-v1.json" ]] || {
             echo "::error::Missing frozen build-input-v1.json."; exit 2;
           }
           [[ "$(jq -r '.request_id' "$SNAPSHOT_REF/build-input-v1.json")" == "$REQUEST_ID" ]]
           [[ "$(jq -r '.target.version' "$SNAPSHOT_REF/build-input-v1.json")" == "$TARGET_VERSION" ]]
+          [[ "$(jq -r '.digest' "$SNAPSHOT_REF/build-input-v1.json")" == "$BUILD_INPUT_DIGEST" ]]
+          [[ "$(jq -r '.build.git_commit_sha' "$SNAPSHOT_REF/build-input-v1.json")" == "$TRUSTED_CODE_COMMIT" ]]
+          git merge-base --is-ancestor "$TRUSTED_CODE_COMMIT" "$GITHUB_SHA"
+          while IFS= read -r -d '' changed; do
+            [[ "$changed" == "$SNAPSHOT_REF/"* ]] || {
+              echo "::error::Evidence commit changed protected path: $changed"; exit 2;
+            }
+          done < <(git diff --name-only -z "$TRUSTED_CODE_COMMIT" "$GITHUB_SHA")
 
       - name: Install pinned apk-tools comparator
         env:
@@ -103,11 +126,12 @@ jobs:
         id: evidence
         env:
           BUILD_INPUT: ${{ inputs.snapshot_ref }}/build-input-v1.json
+          TRUSTED_CODE_COMMIT: ${{ inputs.trusted_code_commit_sha }}
         run: |
           set -euo pipefail
           python scripts/verify-build-input.py \
             --input "$BUILD_INPUT" --repo-root . \
-            --repository "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" --commit "$TRUSTED_CODE_COMMIT" \
             --stage "$RUNNER_TEMP/preflight" --output generated/verified-build-context.json \
             --offline-recheck
           echo "digest=$(jq -r '.build_input_digest' generated/verified-build-context.json)" >> "$GITHUB_OUTPUT"
@@ -116,7 +140,9 @@ jobs:
         env:
           BUILD_INPUT: ${{ inputs.snapshot_ref }}/build-input-v1.json
           TRUSTED_REPOSITORY: ${{ github.repository }}
-          TRUSTED_COMMIT: ${{ github.sha }}
+          TRUSTED_COMMIT: ${{ inputs.trusted_code_commit_sha }}
+          EVIDENCE_COMMIT: ${{ github.sha }}
+          WORKFLOW_RUNTIME_SHA: ${{ github.sha }}
         run: scripts/build-image.sh
 
       - name: Validate artifact safety
