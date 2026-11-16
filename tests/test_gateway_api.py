@@ -427,4 +427,5 @@ def test_t14b_routes_are_not_exposed_as_fake_success(tmp_path):
     ):
         response = getattr(client, method)(path, headers=auth(token))
         assert response.status_code == 404
-        assert error_code(response) == "INVALID_REQUEST"
+        expected = "EVIDENCE_NOT_FOUND" if path.endswith(("/artifacts", "/logs")) else "INVALID_REQUEST"
+        assert error_code(response) == expected
