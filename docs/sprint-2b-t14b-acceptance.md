@@ -22,7 +22,9 @@ or claim flash safety. `flash_ready=false` remains invariant.
 | B08 artifact/provenance | PASS (synthetic ZIP) | Expiry/envelope, ZIP traversal/type/duplicate/size/ratio, v2 schema/digest, run/request/Snapshot/Plan, firmware SHA256/size and `flash_ready=false` checks. |
 | B09 API | PASS | Idempotent POST and device-scoped task/artifact/log GET routes. `/targets` and `/analysis` remain documented as not implemented. |
 | B10 log safety | PASS | Bounded line/byte output, invalid UTF-8 replacement, control removal and secret-field redaction. Raw logs are not returned. |
-| B11 regression | PASS locally except platform scanner suite | 287 tests collected. The non-scanner suite has 246 passed and 1 environment skip; macOS system `awk` cannot run the 40 existing OpenWrt scanner cases, so authoritative full-suite evidence is Linux CI. |
+| B11 regression | PASS | 287 tests collected. Linux CI run 43787593574 completed with 286 passed and 1 skipped; its separate pinned real apk-tools job passed. actionlint, ShellCheck, YAML/Python checks, online index validation and strict negative gates also passed. |
+
+CI evidence: <https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/43787593574>.
 
 ## Security proofs covered by tests
 
