@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-import httpx
+import httpx2 as httpx
 from fastapi.testclient import TestClient
 
 from gateway.app import GatewaySettings, create_app
