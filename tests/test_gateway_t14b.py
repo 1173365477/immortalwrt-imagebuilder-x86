@@ -554,6 +554,127 @@ def test_startup_recovery_dispatches_never_claimed_intent_once(tmp_path):
     assert store.get_task("router-a", "request-001").status == TaskStatus.QUEUED
 
 
+def test_startup_recovery_isolates_expired_task_and_continues_after_restart(tmp_path):
+    api = MockGitHub()
+    api.raise_after_dispatch = True
+    store, _, _, worker = service(tmp_path, api)
+    expired_request = request(request_id="expired-request")
+    expired = worker.dispatch(
+        validated_task(store, build_request=expired_request),
+        TrustedVerifier().verify(expired_request),
+    )
+    assert expired.status == TaskStatus.DISPATCH_UNKNOWN
+
+    api.raise_after_dispatch = False
+    api.response = DispatchResponse(102)
+    healthy_request = request(request_id="healthy-request")
+    healthy = worker.dispatch(
+        validated_task(store, build_request=healthy_request),
+        TrustedVerifier().verify(healthy_request),
+    )
+    assert healthy.status == TaskStatus.QUEUED
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE build_tasks SET expires_at=1 WHERE internal_task_id=?",
+            (expired.internal_task_id,),
+        )
+        connection.execute(
+            "UPDATE dispatch_intents SET dispatch_requested_at=1 WHERE internal_task_id=?",
+            (expired.internal_task_id,),
+        )
+        connection.execute(
+            "UPDATE dispatch_intents SET dispatch_requested_at=2 WHERE internal_task_id=?",
+            (healthy.internal_task_id,),
+        )
+
+    summary = worker.recover_startup()
+    assert summary["expired"] == 1
+    assert summary["polled"] == 1
+    assert summary["deferred"] == 0
+    assert api.dispatch_calls == 2
+    expired_intent = store.get_dispatch_intent(expired.internal_task_id)
+    assert expired_intent.dispatch_state == "UNKNOWN"
+    assert expired_intent.external_task_id.startswith("gw-")
+    with pytest.raises(GatewayError) as raised:
+        store.get_task("router-a", "expired-request")
+    assert raised.value.code == ErrorCode.REQUEST_EXPIRED
+
+    restarted_store = GatewayStore(store.path)
+    restarted_store.initialize()
+    restarted = T14BService(
+        restarted_store,
+        GitHubAppTokenProvider(Issuer(), installation_id=7, repository=REPOSITORY),
+        api, repository=REPOSITORY,
+    )
+    second_summary = restarted.recover_startup()
+    assert second_summary["expired"] == 1
+    assert second_summary["polled"] == 1
+    assert api.dispatch_calls == 2
+
+
+def test_startup_recovery_continues_across_expired_corrupt_and_healthy_tasks(
+    tmp_path, monkeypatch
+):
+    api = MockGitHub()
+    store, _, _, worker = service(tmp_path, api)
+    tasks = []
+    for index, request_id in enumerate(("expired", "corrupt", "healthy"), start=101):
+        api.response = DispatchResponse(index)
+        build_request = request(request_id=request_id)
+        tasks.append(worker.dispatch(
+            validated_task(store, device_id=f"router-{request_id}",
+                           build_request=build_request),
+            TrustedVerifier().verify(build_request),
+        ))
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE build_tasks SET expires_at=1 WHERE internal_task_id=?",
+            (tasks[0].internal_task_id,),
+        )
+        for order, task in enumerate(tasks, start=1):
+            connection.execute(
+                "UPDATE dispatch_intents SET dispatch_requested_at=? WHERE internal_task_id=?",
+                (order, task.internal_task_id),
+            )
+    original = store.get_task_for_recovery
+
+    def selectively_corrupt(task_id):
+        if task_id == tasks[1].internal_task_id:
+            raise RuntimeError("simulated damaged recovery record")
+        return original(task_id)
+
+    monkeypatch.setattr(store, "get_task_for_recovery", selectively_corrupt)
+    summary = worker.recover_startup()
+    assert summary["expired"] == 1
+    assert summary["deferred"] == 1
+    assert summary["polled"] == 1
+    assert api.dispatch_calls == 3
+
+
+def test_startup_recovery_never_claims_expired_pending_dispatch(tmp_path):
+    store, _, api, worker = service(tmp_path)
+    task = validated_task(store)
+    external = store.external_task_id(task.internal_task_id)
+    intent, _ = store.create_dispatch_intent(
+        task, trusted_code_commit_sha=CODE, workflow_id=WORKFLOW,
+        dispatch_ref=f"evidence/{external}", snapshot_digest="1" * 64,
+        plan_digest="2" * 64, target_version="25.12.2",
+    )
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE build_tasks SET expires_at=1 WHERE internal_task_id=?",
+            (task.internal_task_id,),
+        )
+    summary = worker.recover_startup()
+    assert summary["expired"] == 1
+    assert summary["pending"] == 0
+    assert api.dispatch_calls == 0
+    persisted = store.get_dispatch_intent(task.internal_task_id)
+    assert persisted.dispatch_intent_id == intent.dispatch_intent_id
+    assert persisted.dispatch_state == "PENDING"
+    assert persisted.github_run_id is None
+
+
 def test_api_dispatch_artifact_logs_and_device_isolation(tmp_path):
     settings = GatewaySettings(
         database_path=tmp_path / "gateway.db", trusted_repository=REPOSITORY,
@@ -922,4 +1043,83 @@ def test_artifact_verification_is_streamed_and_serialized_per_task(tmp_path):
     assert api.artifact_download_calls == 1
     assert maximum == 1
     assert peak < 7 * 1024 * 1024
+
+
+def test_artifact_lock_registry_keeps_waiters_on_one_lock_after_failure(tmp_path):
+    store, _, api, worker = service(tmp_path)
+    task = worker.dispatch(validated_task(store), TrustedVerifier().verify(request()))
+    task = store.transition_task(task.internal_task_id, TaskStatus.RUNNING, allow_t14b=True)
+    task = store.transition_task(
+        task.internal_task_id, TaskStatus.VERIFYING_ARTIFACT, allow_t14b=True
+    )
+    intent = store.get_dispatch_intent(task.internal_task_id)
+    api.artifact = artifact_zip(
+        task, intent, mutate=lambda value: value.update(build_input_digest="9" * 64)
+    )
+    original_download = api.artifact_zip
+    download_entered = threading.Event()
+    release_download = threading.Event()
+    second_inside_lock = threading.Event()
+    release_second = threading.Event()
+    role = threading.local()
+
+    def blocked_download(*args):
+        download_entered.set()
+        assert release_download.wait(2)
+        return original_download(*args)
+
+    original_get_task = store.get_task
+
+    def controlled_get_task(*args, **kwargs):
+        if getattr(role, "name", "") == "second":
+            second_inside_lock.set()
+            assert release_second.wait(2)
+        return original_get_task(*args, **kwargs)
+
+    def verify(name):
+        role.name = name
+        return worker.verify_artifact(task)
+
+    api.artifact_zip = blocked_download
+    store.get_task = controlled_get_task
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        first = pool.submit(verify, "first")
+        assert download_entered.wait(2)
+        second = pool.submit(verify, "second")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with worker._artifact_lock_guard:
+                entry = worker._artifact_locks.get(task.internal_task_id)
+                if entry is not None and entry.users == 2:
+                    first_entry_id = id(entry)
+                    break
+            time.sleep(0.005)
+        else:
+            pytest.fail("second verifier was not registered as a waiter")
+
+        release_download.set()
+        assert second_inside_lock.wait(2)
+        with pytest.raises(GatewayError) as raised:
+            first.result(timeout=2)
+        assert raised.value.code == ErrorCode.ARTIFACT_UNVERIFIED
+
+        third = pool.submit(verify, "third")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with worker._artifact_lock_guard:
+                entry = worker._artifact_locks.get(task.internal_task_id)
+                if entry is not None and entry.users == 2:
+                    assert id(entry) == first_entry_id
+                    break
+            time.sleep(0.005)
+        else:
+            pytest.fail("third verifier did not join the existing lock entry")
+        release_second.set()
+        assert second.result(timeout=2).status == TaskStatus.ARTIFACT_FAILED
+        assert third.result(timeout=2).status == TaskStatus.ARTIFACT_FAILED
+
+    assert original_get_task("router-a", "request-001").status == TaskStatus.ARTIFACT_FAILED
+    assert api.artifact_download_calls == 1
+    with worker._artifact_lock_guard:
+        assert task.internal_task_id not in worker._artifact_locks
 

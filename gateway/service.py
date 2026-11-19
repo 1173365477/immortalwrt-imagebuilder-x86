@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from .artifacts import verify_artifact_zip
 from .database import DispatchIntent, GatewayStore, TaskRecord
@@ -16,6 +16,12 @@ from .github import (
     read_with_backoff, select_unique_run, validate_run,
 )
 from .state import TaskStatus
+
+
+@dataclass
+class _ArtifactLockEntry:
+    lock: threading.Lock
+    users: int = 0
 
 
 class T14BService:
@@ -36,7 +42,7 @@ class T14BService:
         self._read_slots = threading.BoundedSemaphore(max_concurrent_reads)
         self._artifact_slots = threading.BoundedSemaphore(max_concurrent_artifacts)
         self._artifact_lock_guard = threading.Lock()
-        self._artifact_locks: dict[str, threading.Lock] = {}
+        self._artifact_locks: dict[str, _ArtifactLockEntry] = {}
 
     def _read(self, operation):
         if not self._read_slots.acquire(timeout=1.0):
@@ -119,10 +125,16 @@ class T14BService:
     def recover_startup(self) -> dict[str, int]:
         """Reconcile durable work without ever blindly redispatching ambiguity."""
         summary = {"pending": 0, "unknown": 0, "polled": 0, "artifact": 0,
-                   "deferred": 0}
+                   "expired": 0, "deferred": 0}
         for intent in self.store.list_recoverable_intents():
-            task = self.store.get_task(intent.device_id, intent.request_id)
             try:
+                task = self.store.get_task_for_recovery(intent.internal_task_id)
+                if int(time.time()) >= task.expires_at:
+                    # Keep the task and intent untouched for audit/manual
+                    # reconciliation. In particular, never claim a pending
+                    # expired intent and never redispatch it.
+                    summary["expired"] += 1
+                    continue
                 if task.status == TaskStatus.DISPATCH_PENDING:
                     claimed = self.store.claim_dispatch(intent.dispatch_intent_id)
                     if claimed is not None:
@@ -141,10 +153,31 @@ class T14BService:
                 elif task.status == TaskStatus.VERIFYING_ARTIFACT:
                     self.verify_artifact(task)
                     summary["artifact"] += 1
-            except GatewayError:
-                # Preserve the last durable state for a later bounded reconciliation.
+            except Exception:
+                # One corrupt or temporarily unavailable record must not abort
+                # recovery of unrelated tasks. Preserve its durable state for
+                # later manual or bounded reconciliation.
                 summary["deferred"] += 1
         return summary
+
+    def _register_artifact_lock(self, task_id: str) -> _ArtifactLockEntry:
+        with self._artifact_lock_guard:
+            entry = self._artifact_locks.get(task_id)
+            if entry is None:
+                entry = _ArtifactLockEntry(threading.Lock())
+                self._artifact_locks[task_id] = entry
+            entry.users += 1
+            return entry
+
+    def _unregister_artifact_lock(self, task_id: str,
+                                  entry: _ArtifactLockEntry) -> None:
+        with self._artifact_lock_guard:
+            current = self._artifact_locks.get(task_id)
+            if current is not entry or entry.users <= 0:
+                raise RuntimeError("artifact lock registry invariant violated")
+            entry.users -= 1
+            if entry.users == 0:
+                del self._artifact_locks[task_id]
 
     def reconcile(self, task: TaskRecord) -> TaskRecord:
         intent = self._intent(task)
@@ -207,16 +240,16 @@ class T14BService:
     def verify_artifact(self, task: TaskRecord) -> TaskRecord:
         if task.status != TaskStatus.VERIFYING_ARTIFACT:
             raise GatewayError(ErrorCode.ARTIFACT_UNVERIFIED, 409)
-        with self._artifact_lock_guard:
-            lock = self._artifact_locks.setdefault(
-                task.internal_task_id, threading.Lock()
-            )
-        if not lock.acquire(timeout=1.0):
-            raise GatewayError(ErrorCode.UPSTREAM_UNAVAILABLE, 503)
-        if not self._artifact_slots.acquire(timeout=1.0):
-            lock.release()
-            raise GatewayError(ErrorCode.UPSTREAM_UNAVAILABLE, 503)
+        entry = self._register_artifact_lock(task.internal_task_id)
+        lock_acquired = False
+        slot_acquired = False
         try:
+            lock_acquired = entry.lock.acquire(timeout=1.0)
+            if not lock_acquired:
+                raise GatewayError(ErrorCode.UPSTREAM_UNAVAILABLE, 503)
+            slot_acquired = self._artifact_slots.acquire(timeout=1.0)
+            if not slot_acquired:
+                raise GatewayError(ErrorCode.UPSTREAM_UNAVAILABLE, 503)
             current = self.store.get_task(task.device_id, task.request_id)
             if current.status != TaskStatus.VERIFYING_ARTIFACT:
                 return current
@@ -243,11 +276,11 @@ class T14BService:
                 )
             raise
         finally:
-            self._artifact_slots.release()
-            lock.release()
-            with self._artifact_lock_guard:
-                if not lock.locked():
-                    self._artifact_locks.pop(task.internal_task_id, None)
+            if slot_acquired:
+                self._artifact_slots.release()
+            if lock_acquired:
+                entry.lock.release()
+            self._unregister_artifact_lock(task.internal_task_id, entry)
 
     def logs(self, task: TaskRecord) -> tuple[list[str], bool]:
         intent = self._intent(task)

@@ -81,6 +81,13 @@ deadline expires, the worker slot remains reserved until the underlying call
 finishes; Python cannot forcibly cancel that thread, so production transports
 must also enforce finite socket timeouts.
 
+Startup recovery handles each intent independently. It may read an expired
+task through an internal audit-only database path, but expiry remains enforced
+for every client API. An expired record is neither claimed nor polled and can
+never cause automatic redispatch; its task, intent, external identity, Run
+binding, timestamps, and failure state remain durable for manual reconciliation.
+A corrupt record is deferred without preventing later records from recovering.
+
 ## Run, artifact, and log trust
 
 The REST mapping is pinned to GitHub API version `2026-03-10`. Dispatch accepts
@@ -99,7 +106,10 @@ The verifier validates provenance schema and digest and recomputes firmware
 SHA256/size while binding repository, runtime SHA, request, Build Input,
 Snapshot, Plan, Gateway task ID, run ID, and attempt. Artifact bytes are spooled
 with a hard download bound, firmware hashing is streamed, and verification is
-bounded globally and mutually exclusive per task.
+bounded globally and mutually exclusive per task. The per-task lock registry
+counts active callers and waiters under one registry guard; an entry is removed
+only when its reference count reaches zero, so a newly arriving verifier cannot
+create a second lock while an older waiter still exists.
 
 Project provenance is an internal evidence record, not a GitHub cryptographic
 Artifact Attestation. This implementation does not claim independent signature

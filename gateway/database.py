@@ -476,6 +476,25 @@ class GatewayStore:
             raise GatewayError(ErrorCode.REQUEST_EXPIRED, 410)
         return task
 
+    def get_task_for_recovery(self, internal_task_id: str) -> TaskRecord:
+        """Read durable task state for startup audit without reviving expiry.
+
+        This internal-only path deliberately does not make an expired task
+        client-accessible. Recovery uses it to isolate the record and retain
+        its dispatch/run identities without performing another dispatch.
+        """
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT * FROM build_tasks WHERE internal_task_id=?",
+                    (internal_task_id,),
+                ).fetchone()
+            if row is None:
+                raise sqlite3.DatabaseError("recovery task missing")
+            return TaskRecord.from_row(row)
+        except (sqlite3.Error, ValueError, TypeError) as exc:
+            raise self._storage_error(exc) from exc
+
     def transition_task(
         self,
         internal_task_id: str,
