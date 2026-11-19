@@ -3,9 +3,9 @@
   "$id": "https://github.com/1173365477/immortalwrt-imagebuilder-x86/schemas/build-provenance-v2.json",
   "title": "Smart-upgrade build provenance v2",
   "type": "object", "additionalProperties": false,
-  "required": ["schema_version", "provenance_id", "digest", "request_id", "created_at", "build_input_id", "build_input_digest", "snapshot_id", "snapshot_digest", "plan_id", "plan_digest", "target", "resolution_digest", "official_index_digest", "provider_assets", "trace", "imagebuilder", "artifact", "build_status", "verification_status", "compatibility_validated", "build_allowed", "flash_ready"],
+  "required": ["schema_version", "provenance_id", "digest", "gateway_task_id", "request_id", "created_at", "build_input_id", "build_input_digest", "snapshot_id", "snapshot_digest", "plan_id", "plan_digest", "target", "resolution_digest", "official_index_digest", "provider_assets", "trace", "imagebuilder", "artifact", "build_status", "verification_status", "compatibility_validated", "build_allowed", "flash_ready"],
   "properties": {
-    "schema_version": {"const": "2.0.0"}, "provenance_id": {"$ref": "#/$defs/urn"}, "digest": {"$ref": "#/$defs/hex"}, "request_id": {"type": "string", "minLength": 1}, "created_at": {"type": "string", "format": "date-time"},
+    "schema_version": {"const": "2.0.0"}, "provenance_id": {"$ref": "#/$defs/urn"}, "digest": {"$ref": "#/$defs/hex"}, "gateway_task_id": {"type": "string", "pattern": "^gw-[a-f0-9]{32}$"}, "request_id": {"type": "string", "minLength": 1}, "created_at": {"type": "string", "format": "date-time"},
     "build_input_id": {"$ref": "#/$defs/urn"}, "build_input_digest": {"$ref": "#/$defs/hex"}, "snapshot_id": {"$ref": "#/$defs/urn"}, "snapshot_digest": {"$ref": "#/$defs/hex"}, "plan_id": {"$ref": "#/$defs/urn"}, "plan_digest": {"$ref": "#/$defs/hex"},
     "target": {"type": "object"}, "resolution_digest": {"$ref": "#/$defs/hex"}, "official_index_digest": {"$ref": "#/$defs/hex"},
     "provider_assets": {"type": "array", "items": {"type": "object", "required": ["provider", "release_id", "asset_id", "sha256"], "properties": {"provider": {"type": "string"}, "release_id": {"type": "integer"}, "asset_id": {"type": "integer"}, "sha256": {"$ref": "#/$defs/hex"}}, "additionalProperties": false}},

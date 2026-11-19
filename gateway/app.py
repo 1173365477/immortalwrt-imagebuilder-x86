@@ -41,6 +41,8 @@ class GatewaySettings:
     task_ttl_seconds: int = 7 * 24 * 60 * 60
     validation_timeout_seconds: float = 30.0
     validation_workers: int = 4
+    external_workers: int = 4
+    external_timeout_seconds: float = 30.0
     sqlite_busy_timeout_ms: int = 1_000
     dispatch_enabled: bool = False
 
@@ -136,6 +138,7 @@ def _response(
         build_input_digest=task.build_input_digest,
         repository=task.repository,
         evidence_commit_sha=task.evidence_commit_sha,
+        gateway_task_id=intent.external_task_id if intent else None,
         trusted_code_commit_sha=intent.trusted_code_commit_sha if intent else None,
         github_run_id=task.github_run_id,
         github_run_attempt=task.github_run_attempt,
@@ -169,14 +172,21 @@ def create_app(
         if (t14b_service.store.path != store.path
                 or t14b_service.repository != settings.trusted_repository):
             raise ValueError("T14-B service identity does not match Gateway settings")
-        recovery = t14b_service.recover_startup()
-        if any(recovery.values()):
-            audit("t14b_startup_recovery", status="reconciled")
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        yield
-        application.state.validation_executor.shutdown(wait=False, cancel_futures=True)
+        if settings.dispatch_enabled and t14b_service is not None:
+            try:
+                recovery = await run_external(t14b_service.recover_startup)
+                if any(recovery.values()):
+                    audit("t14b_startup_recovery", status="reconciled")
+            except GatewayError:
+                audit("t14b_startup_recovery", status="deferred")
+        try:
+            yield
+        finally:
+            application.state.validation_executor.shutdown(wait=False, cancel_futures=True)
+            application.state.external_executor.shutdown(wait=False, cancel_futures=True)
 
     app = FastAPI(
         title="OpenWrt Smart Upgrade Build Gateway",
@@ -195,7 +205,49 @@ def create_app(
         max_workers=settings.validation_workers,
         thread_name_prefix="gateway-evidence",
     )
+    app.state.external_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=settings.external_workers,
+        thread_name_prefix="gateway-github",
+    )
     validation_slots = asyncio.Semaphore(settings.validation_workers)
+    external_slots = asyncio.Semaphore(settings.external_workers)
+
+    async def run_external(function, *args):
+        """Bound sync I/O without releasing capacity while timed-out work runs."""
+        try:
+            await asyncio.wait_for(
+                external_slots.acquire(), timeout=settings.external_timeout_seconds
+            )
+        except TimeoutError as exc:
+            raise GatewayError(ErrorCode.UPSTREAM_UNAVAILABLE, 503) from exc
+        loop = asyncio.get_running_loop()
+        try:
+            future = loop.run_in_executor(
+                app.state.external_executor, function, *args
+            )
+        except BaseException:
+            external_slots.release()
+            raise
+        release_in_callback = False
+
+        def release_slot(_future: object) -> None:
+            loop.call_soon_threadsafe(external_slots.release)
+
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(future), timeout=settings.external_timeout_seconds
+            )
+        except TimeoutError as exc:
+            release_in_callback = True
+            future.add_done_callback(release_slot)
+            raise GatewayError(ErrorCode.UPSTREAM_UNAVAILABLE, 503) from exc
+        except BaseException:
+            release_in_callback = True
+            future.add_done_callback(release_slot)
+            raise
+        finally:
+            if not release_in_callback:
+                external_slots.release()
 
     async def verify_with_bounded_workers(build_request: BuildRequest):
         """Keep a slot occupied until a timed-out worker actually terminates."""
@@ -353,7 +405,7 @@ def create_app(
                         failure_code=ErrorCode.DISPATCH_DISABLED,
                     )
                 else:
-                    task = t14b_service.dispatch(task, verdict)
+                    task = await run_external(t14b_service.dispatch, task, verdict)
             response.status_code = 201
         else:
             response.status_code = 200
@@ -381,9 +433,9 @@ def create_app(
         apply_rate_limit(identity, "GET:/builds")
         task = store.get_task(identity.device_id, request_id)
         if t14b_service and task.status == TaskStatus.DISPATCH_UNKNOWN:
-            task = t14b_service.reconcile(task)
+            task = await run_external(t14b_service.reconcile, task)
         elif t14b_service and task.status in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
-            task = t14b_service.poll(task)
+            task = await run_external(t14b_service.poll, task)
         audit(
             "build_query",
             request_id=task.request_id,
@@ -402,7 +454,7 @@ def create_app(
         apply_rate_limit(identity, "GET:/builds/artifacts")
         task = store.get_task(identity.device_id, request_id)
         if t14b_service and task.status == TaskStatus.VERIFYING_ARTIFACT:
-            task = t14b_service.verify_artifact(task)
+            task = await run_external(t14b_service.verify_artifact, task)
         raw = store.get_verified_artifact(task.internal_task_id)
         if raw is None:
             raise GatewayError(ErrorCode.ARTIFACT_UNVERIFIED, 409)
@@ -417,7 +469,7 @@ def create_app(
         task = store.get_task(identity.device_id, request_id)
         if t14b_service is None:
             raise GatewayError(ErrorCode.EVIDENCE_NOT_FOUND, 404)
-        lines, truncated = t14b_service.logs(task)
+        lines, truncated = await run_external(t14b_service.logs, task)
         return LogResponse(
             request_id=task.request_id, lines=lines, truncated=truncated,
             flash_ready=False,

@@ -17,7 +17,7 @@ from .models import BuildRequest
 from .state import TaskStatus, ensure_t14a_transition, ensure_t14b_transition
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCRYPT_N = 1 << 14
 SCRYPT_R = 8
 SCRYPT_P = 1
@@ -61,6 +61,7 @@ class DispatchIntent:
     internal_task_id: str
     device_id: str
     request_id: str
+    external_task_id: str
     build_input_digest: str
     evidence_commit_sha: str
     trusted_code_commit_sha: str
@@ -170,6 +171,7 @@ class GatewayStore:
                         internal_task_id TEXT NOT NULL UNIQUE REFERENCES build_tasks(internal_task_id),
                         device_id TEXT NOT NULL,
                         request_id TEXT NOT NULL,
+                        external_task_id TEXT NOT NULL UNIQUE,
                         build_input_digest TEXT NOT NULL,
                         evidence_commit_sha TEXT NOT NULL,
                         trusted_code_commit_sha TEXT NOT NULL,
@@ -180,7 +182,7 @@ class GatewayStore:
                         plan_digest TEXT NOT NULL,
                         target_version TEXT NOT NULL,
                         dispatch_state TEXT NOT NULL,
-                        github_run_id INTEGER,
+                        github_run_id INTEGER UNIQUE,
                         github_run_attempt INTEGER,
                         dispatch_requested_at INTEGER,
                         last_reconciled_at INTEGER,
@@ -194,7 +196,7 @@ class GatewayStore:
                         metadata_json TEXT NOT NULL,
                         verified_at INTEGER NOT NULL
                     );
-                    INSERT INTO gateway_meta(key, value) VALUES('schema_version', '2')
+                    INSERT INTO gateway_meta(key, value) VALUES('schema_version', '3')
                         ON CONFLICT(key) DO NOTHING;
                     COMMIT;
                     """
@@ -205,6 +207,38 @@ class GatewayStore:
                 if version is not None and int(version["value"]) == 1:
                     connection.execute(
                         "UPDATE gateway_meta SET value='2' WHERE key='schema_version' AND value='1'"
+                    )
+                    version = connection.execute(
+                        "SELECT value FROM gateway_meta WHERE key='schema_version'"
+                    ).fetchone()
+                if version is not None and int(version["value"]) == 2:
+                    columns = {
+                        row["name"] for row in connection.execute(
+                            "PRAGMA table_info(dispatch_intents)"
+                        ).fetchall()
+                    }
+                    if "external_task_id" not in columns:
+                        connection.execute(
+                            "ALTER TABLE dispatch_intents ADD COLUMN external_task_id TEXT"
+                        )
+                    connection.execute(
+                        """UPDATE dispatch_intents
+                           SET external_task_id='gw-' || replace(internal_task_id, '-', '')
+                           WHERE external_task_id IS NULL"""
+                    )
+                    connection.execute(
+                        """CREATE UNIQUE INDEX IF NOT EXISTS
+                           dispatch_intents_external_task_idx
+                           ON dispatch_intents(external_task_id)"""
+                    )
+                    connection.execute(
+                        """CREATE UNIQUE INDEX IF NOT EXISTS
+                           dispatch_intents_github_run_idx
+                           ON dispatch_intents(github_run_id)
+                           WHERE github_run_id IS NOT NULL"""
+                    )
+                    connection.execute(
+                        "UPDATE gateway_meta SET value='3' WHERE key='schema_version' AND value='2'"
                     )
                     version = connection.execute(
                         "SELECT value FROM gateway_meta WHERE key='schema_version'"
@@ -223,6 +257,14 @@ class GatewayStore:
         return hashlib.scrypt(
             secret.encode("utf-8"), salt=salt, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, dklen=32
         )
+
+    @staticmethod
+    def external_task_id(internal_task_id: str) -> str:
+        try:
+            value = uuid.UUID(internal_task_id)
+        except ValueError as exc:
+            raise GatewayError(ErrorCode.INTERNAL_ERROR, 500) from exc
+        return f"gw-{value.hex}"
 
     def issue_credential(self, device_id: str, *, ttl_seconds: int, now: int | None = None) -> str:
         if not device_id or len(device_id) > 128 or ttl_seconds <= 0:
@@ -519,6 +561,7 @@ class GatewayStore:
         plan_digest: str, target_version: str, now: int | None = None,
     ) -> tuple[DispatchIntent, bool]:
         timestamp = int(time.time() if now is None else now)
+        external_task_id = self.external_task_id(task.internal_task_id)
         try:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
@@ -528,10 +571,11 @@ class GatewayStore:
                 ).fetchone()
                 if row is not None:
                     intent = DispatchIntent.from_row(row)
-                    expected = (task.build_input_digest, task.evidence_commit_sha,
+                    expected = (external_task_id, task.build_input_digest, task.evidence_commit_sha,
                                 trusted_code_commit_sha, workflow_id, dispatch_ref,
                                 snapshot_digest, plan_digest, target_version)
-                    actual = (intent.build_input_digest, intent.evidence_commit_sha,
+                    actual = (intent.external_task_id, intent.build_input_digest,
+                              intent.evidence_commit_sha,
                               intent.trusted_code_commit_sha, intent.trusted_workflow_id,
                               intent.dispatch_ref, intent.snapshot_digest, intent.plan_digest,
                               intent.target_version)
@@ -551,12 +595,13 @@ class GatewayStore:
                 connection.execute(
                     """INSERT INTO dispatch_intents
                        (dispatch_intent_id, internal_task_id, device_id, request_id,
-                        build_input_digest, evidence_commit_sha, trusted_code_commit_sha,
+                        external_task_id, build_input_digest, evidence_commit_sha,
+                        trusted_code_commit_sha,
                         trusted_workflow_id, dispatch_ref, expected_runtime_sha,
                         snapshot_digest, plan_digest, target_version, dispatch_state)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')""",
                     (intent_id, current.internal_task_id, current.device_id, current.request_id,
-                     current.build_input_digest, current.evidence_commit_sha,
+                     external_task_id, current.build_input_digest, current.evidence_commit_sha,
                      trusted_code_commit_sha, workflow_id, dispatch_ref,
                      current.evidence_commit_sha, snapshot_digest, plan_digest,
                      target_version),

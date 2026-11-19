@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import json
+import io
 import re
+import stat
+import tempfile
 import time
+import zipfile
 from dataclasses import dataclass
-from typing import Protocol
+from pathlib import PurePosixPath
+from typing import BinaryIO, Protocol
 from urllib.parse import quote, urlparse
 
 from .database import DispatchIntent
@@ -73,19 +78,23 @@ class WorkflowRun:
     event: str
     head_sha: str
     dispatch_ref: str
-    request_id: str
+    external_task_id: str
     build_input_digest: str
     status: str
     conclusion: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass
 class ArtifactDownload:
-    data: bytes
+    archive: BinaryIO
+    size_bytes: int
     repository: str
     run_id: int
     run_attempt: int
     expired: bool = False
+
+    def close(self) -> None:
+        self.archive.close()
 
 
 class GitHubAPI(Protocol):
@@ -97,8 +106,8 @@ class GitHubAPI(Protocol):
                   head_sha: str) -> list[WorkflowRun]: ...
     def artifact_zip(self, token: str, repository: str, run_id: int,
                      run_attempt: int) -> ArtifactDownload: ...
-    def sanitized_log_source(self, token: str, repository: str, run_id: int,
-                             run_attempt: int) -> bytes: ...
+    def log_archive(self, token: str, repository: str, run_id: int,
+                    run_attempt: int) -> bytes: ...
 
 
 class GitHubRateLimited(RuntimeError):
@@ -127,8 +136,15 @@ class GitHubHTTPTransport(Protocol):
                 json_body: dict[str, object] | None = None,
                 max_bytes: int = 1024 * 1024) -> HTTPResult: ...
 
+    def download(self, method: str, path: str, token: str, destination: BinaryIO, *,
+                 api_version: str = API_VERSION,
+                 max_bytes: int) -> HTTPResult: ...
 
-_RUN_TITLE = re.compile(r"^immutable-(?P<request>.+)-(?P<digest>[a-f0-9]{64})$")
+
+_EXTERNAL_TASK = r"gw-[a-f0-9]{32}"
+_RUN_TITLE = re.compile(
+    rf"^gateway-(?P<external>{_EXTERNAL_TASK})-(?P<digest>[a-f0-9]{{64}})$"
+)
 
 
 class GitHubRESTClient:
@@ -221,7 +237,7 @@ class GitHubRESTClient:
             "repository": full_name, "workflow_id": workflow,
             "event": value.get("event"), "head_sha": value.get("head_sha"),
             "dispatch_ref": value.get("head_branch"),
-            "request_id": match.group("request") if match else None,
+            "external_task_id": match.group("external") if match else None,
             "build_input_digest": match.group("digest") if match else None,
             "status": value.get("status"), "conclusion": value.get("conclusion"),
         }
@@ -229,7 +245,7 @@ class GitHubRESTClient:
                 or not isinstance(fields["run_attempt"], int)
                 or any(not isinstance(fields[key], str) for key in (
                     "repository", "workflow_id", "event", "head_sha", "dispatch_ref",
-                    "request_id", "build_input_digest", "status",
+                    "external_task_id", "build_input_digest", "status",
                 ))
                 or (fields["conclusion"] is not None
                     and not isinstance(fields["conclusion"], str))):
@@ -264,7 +280,7 @@ class GitHubRESTClient:
                      run_attempt: int) -> ArtifactDownload:
         self._fixed(repository)
         run = self.get_run(token, repository, run_id)
-        expected = f"immutable-{run.request_id}-{run.build_input_digest}-{run_attempt}"
+        expected = f"gateway-{run.external_task_id}-{run.build_input_digest}-{run_attempt}"
         result = self.transport.request(
             "GET", f"{self._base}/actions/runs/{int(run_id)}/artifacts", token,
             api_version=API_VERSION, query={"per_page": "100"},
@@ -283,24 +299,31 @@ class GitHubRESTClient:
                 or parsed.hostname != "api.github.com"
                 or not parsed.path.startswith(self._base + "/actions/artifacts/")):
             raise GatewayError(ErrorCode.ARTIFACT_UNVERIFIED, 409)
-        archive = self.transport.request(
-            "GET", parsed.path, token, api_version=API_VERSION,
-            max_bytes=256 * 1024 * 1024
-        )
-        if archive.status != 200:
-            self._decode(archive, {200})
-        return ArtifactDownload(
-            archive.body, repository, run_id, run_attempt,
-            expired=artifact.get("expired") is not False,
-        )
+        spool = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b")
+        try:
+            response = self.transport.download(
+                "GET", parsed.path, token, spool, api_version=API_VERSION,
+                max_bytes=256 * 1024 * 1024,
+            )
+            if response.status != 200:
+                self._decode(response, {200})
+            size = spool.tell()
+            spool.seek(0)
+            return ArtifactDownload(
+                spool, size, repository, run_id, run_attempt,
+                expired=artifact.get("expired") is not False,
+            )
+        except BaseException:
+            spool.close()
+            raise
 
-    def sanitized_log_source(self, token: str, repository: str, run_id: int,
-                             run_attempt: int) -> bytes:
+    def log_archive(self, token: str, repository: str, run_id: int,
+                    run_attempt: int) -> bytes:
         self._fixed(repository)
-        del run_attempt
         result = self.transport.request(
-            "GET", f"{self._base}/actions/runs/{int(run_id)}/logs", token,
-            api_version=API_VERSION, max_bytes=64 * 1024,
+            "GET",
+            f"{self._base}/actions/runs/{int(run_id)}/attempts/{int(run_attempt)}/logs",
+            token, api_version=API_VERSION, max_bytes=8 * 1024 * 1024,
         )
         if result.status != 200:
             self._decode(result, {200})
@@ -329,11 +352,11 @@ def validate_run(run: WorkflowRun, intent: DispatchIntent) -> None:
     expected = (
         intent.github_run_id, intent.github_run_attempt, intent.trusted_workflow_id,
         "workflow_dispatch", intent.expected_runtime_sha, intent.dispatch_ref,
-        intent.request_id, intent.build_input_digest,
+        intent.external_task_id, intent.build_input_digest,
     )
     actual = (
         run.run_id, run.run_attempt, run.workflow_id, run.event, run.head_sha,
-        run.dispatch_ref, run.request_id, run.build_input_digest,
+        run.dispatch_ref, run.external_task_id, run.build_input_digest,
     )
     if actual != expected or run.repository == "":
         raise GatewayError(ErrorCode.RUN_IDENTITY_MISMATCH, 409)
@@ -358,22 +381,72 @@ def select_unique_run(candidates: list[WorkflowRun], intent: DispatchIntent) -> 
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _SECRET = re.compile(
-    r"(?i)(authorization|token|secret|password|proxy[_-]?subscription)\s*[:=]\s*\S+"
+    r"(?i)\b(authorization|token|secret|password|proxy[_-]?subscription)\s*[:=].*$"
+)
+_TOKEN = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
 )
 
 
-def sanitize_logs(raw: bytes, *, max_bytes: int = 64 * 1024,
-                  max_lines: int = 1000) -> tuple[list[str], bool]:
-    clipped = raw[:max_bytes]
-    truncated = len(raw) > len(clipped)
-    text = clipped.decode("utf-8", errors="replace")
+@dataclass(frozen=True)
+class LogLimits:
+    archive_bytes: int = 8 * 1024 * 1024
+    expanded_bytes: int = 16 * 1024 * 1024
+    member_bytes: int = 2 * 1024 * 1024
+    members: int = 128
+    compression_ratio: int = 100
+    output_bytes: int = 64 * 1024
+    output_lines: int = 1000
+
+
+def _sanitize_line(source: str) -> str:
+    line = _CONTROL.sub("", source)[:1000]
+    line = _SECRET.sub(lambda match: match.group(1) + "=[REDACTED]", line)
+    return _TOKEN.sub("[REDACTED_TOKEN]", line)
+
+
+def sanitize_log_archive(raw: bytes, *, limits: LogLimits = LogLimits()
+                         ) -> tuple[list[str], bool]:
+    if not raw or len(raw) > limits.archive_bytes:
+        raise GatewayError(ErrorCode.UPSTREAM_UNAVAILABLE, 503)
     lines: list[str] = []
-    for source in text.splitlines():
-        if len(lines) >= max_lines:
-            truncated = True
-            break
-        line = _CONTROL.sub("", source)[:1000]
-        line = _SECRET.sub(lambda match: match.group(1) + "=[REDACTED]", line)
-        lines.append(line)
-    return lines, truncated
+    output_bytes = 0
+    total = 0
+    names: set[str] = set()
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            infos = archive.infolist()
+            if not infos or len(infos) > limits.members:
+                raise ValueError("log member count")
+            for info in infos:
+                path = PurePosixPath(info.filename)
+                mode = info.external_attr >> 16
+                kind = stat.S_IFMT(mode)
+                if (path.is_absolute() or ".." in path.parts or "\\" in info.filename
+                        or info.filename in names or info.is_dir()
+                        or path.suffix != ".txt" or stat.S_ISLNK(mode)
+                        or kind not in {0, stat.S_IFREG}):
+                    raise ValueError("unsafe log member")
+                names.add(info.filename)
+                total += info.file_size
+                if (info.file_size > limits.member_bytes or total > limits.expanded_bytes
+                        or (info.compress_size == 0 and info.file_size > 0)
+                        or (info.compress_size
+                            and info.file_size / info.compress_size > limits.compression_ratio)):
+                    raise ValueError("log limits")
+                content = archive.read(info)
+                if b"\0" in content:
+                    raise ValueError("binary log")
+                text = content.decode("utf-8", errors="strict")
+                for source in text.splitlines():
+                    line = _sanitize_line(source)
+                    encoded = len(line.encode("utf-8"))
+                    if (len(lines) >= limits.output_lines
+                            or output_bytes + encoded > limits.output_bytes):
+                        return lines, True
+                    lines.append(line)
+                    output_bytes += encoded
+    except (OSError, UnicodeError, ValueError, zipfile.BadZipFile) as exc:
+        raise GatewayError(ErrorCode.UPSTREAM_UNAVAILABLE, 503) from exc
+    return lines, False
 

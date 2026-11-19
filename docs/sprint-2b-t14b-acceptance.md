@@ -15,16 +15,16 @@ or claim flash safety. `flash_ready=false` remains invariant.
 | B01 commit/ref protocol and threat model | PASS | Four distinct identities, ancestry and protected-tree checks are documented and exercised by a two-commit fixture. |
 | B02 GitHub App least privilege | PASS (adapter) | Fixed installation/repository, exact Metadata Read / Contents Read / Actions Write permission set, expiry refresh, memory-only token and canary scans. Production issuer is intentionally not configured. |
 | B03 immutable evidence resolver | PASS (controlled fetcher) | Full commit checkout, fixed repository, bounded files/bytes, unsafe type rejection, duplicate-safe JSON, T13 output identity binding. |
-| B04 durable dispatch intent | PASS | SQLite unique intent, transaction-before-side-effect, atomic worker claim, persistent identity, transition audit, concurrent replay tests. |
-| B05 workflow dispatch and run binding | PASS (Mock API) | Fixed workflow/ref/derived inputs; explicit run details and legacy no-ID correlation; exact repository/workflow/event/ref/SHA/request/digest/attempt checks. No production dispatch occurred. |
+| B04 durable dispatch intent | PASS | SQLite unique intent, server-generated globally unique `gateway_task_id`, transaction-before-side-effect, atomic worker claim, globally unique GitHub Run binding, persistent identity, transition audit, concurrent replay tests. |
+| B05 workflow dispatch and run binding | PASS (Mock API) | The Gateway identity is bound through Ref, Workflow input, Run Name, concurrency group, artifact name and provenance. Exact repository/workflow/event/ref/SHA/Gateway identity/digest/attempt checks prevent cross-device Run reuse for both explicit and legacy dispatch responses. No production dispatch occurred. |
 | B06 state and recovery | PASS | Fail-closed transition table; startup distinguishes never-claimed `PENDING` from ambiguous `DISPATCHING`; unknown dispatch is reconciled without redispatch. |
 | B07 run polling | PASS | Queued/running/terminal mapping, attempt pinning, no state regression, bounded read retry/backoff, persisted reconciliation time and request quotas. |
-| B08 artifact/provenance | PASS (synthetic ZIP) | Expiry/envelope, ZIP traversal/type/duplicate/size/ratio, v2 schema/digest, run/request/Snapshot/Plan, firmware SHA256/size and `flash_ready=false` checks. |
+| B08 artifact/provenance | PASS (synthetic ZIP) | Bounded streamed download and firmware hashing, per-task mutual exclusion and bounded verification concurrency; expiry/envelope, ZIP traversal/type/duplicate/size/ratio, v2 schema/digest, Gateway/run/request/Snapshot/Plan identity, firmware SHA256/size and `flash_ready=false` checks. |
 | B09 API | PASS | Idempotent POST and device-scoped task/artifact/log GET routes. `/targets` and `/analysis` remain documented as not implemented. |
-| B10 log safety | PASS | Bounded line/byte output, invalid UTF-8 replacement, control removal and secret-field redaction. Raw logs are not returned. |
-| B11 regression | PASS | 287 tests collected. Linux CI run 43787593574 completed with 286 passed and 1 skipped; its separate pinned real apk-tools job passed. actionlint, ShellCheck, YAML/Python checks, online index validation and strict negative gates also passed. |
+| B10 log safety | PASS | Attempt-specific GitHub log ZIP handling; archive/member/expanded/output bounds; path, type, duplicate, binary and UTF-8 checks; control removal plus secret-field and standalone GitHub-token redaction. Raw archives are not returned. |
+| B11 regression | PENDING CI | 300 tests collected after remediation. Local non-platform-specific regression: 259 passed and 1 skipped. The remaining macOS failures are the pre-existing BSD `awk` incompatibility in the Linux-targeted snapshot fixture; authoritative Linux CI, actionlint, ShellCheck, Schema, strict negatives and pinned real apk-tools results are recorded after push. |
 
-CI evidence: <https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/43787593574>.
+Remediation CI evidence is added after the PR branch is pushed.
 
 ## Security proofs covered by tests
 
@@ -43,15 +43,21 @@ CI evidence: <https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions
    effect path enabled by default.
 10. The commit-bound resolver invokes the existing T13 verifier and binds its
     structured output; exit code zero alone is insufficient.
+11. Two devices using the same `request_id`, with equal or different Build
+    Input digests, receive different server-generated Gateway identities and
+    cannot bind the same GitHub Run under either 200 or legacy 204 responses.
+12. Slow synchronous GitHub adapters execute in a bounded worker pool. A timed
+    out call keeps its capacity reservation until the underlying operation
+    ends, and durable dispatch claiming prevents replay from redispatching it.
 
 ## Workflow and provenance compatibility
 
-The existing workflow inputs remain present. T14-B adds Gateway-only identity
-inputs without re-enabling legacy build bypasses. Runtime code is the evidence
+The existing workflow inputs remain present. T14-B adds the server-generated
+`gateway_task_id` without re-enabling legacy build bypasses. Runtime code is the evidence
 commit, while the Build Input binds its reviewed code ancestor; the workflow
 repeats ancestry and changed-path checks. Provenance v1 is not silently changed:
 new builds emit the separately versioned `build-provenance-v2.json` schema with
-trusted-code, evidence, runtime, run, and attempt identities.
+Gateway task, trusted-code, evidence, runtime, run, and attempt identities.
 
 ## Deployment conditions and remaining risk
 
@@ -70,9 +76,12 @@ Before production enablement, the repository owner must:
   internal project provenance, not an independent GitHub cryptographic
   attestation.
 
-The synchronous adapter boundary is deliberately exercised with mocks. A
-production network transport must be isolated from the application event loop
-and retain the configured concurrency and timeout limits. Evidence publication,
+The synchronous adapter boundary is isolated from the application event loop
+by a bounded executor and timeout/capacity gate. Python threads cannot be
+forcibly cancelled; after an HTTP timeout the underlying bounded operation may
+finish in the background while its slot remains occupied and durable intent
+state prevents redispatch. A production transport must still provide finite
+socket/connect/read timeouts so shutdown latency is bounded. Evidence publication,
 Contents Write, multi-replica coordination, T14-C, automatic flashing, reboot,
 partitioning, and router configuration are outside this sprint.
 

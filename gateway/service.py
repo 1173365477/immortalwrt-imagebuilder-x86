@@ -12,7 +12,7 @@ from .database import DispatchIntent, GatewayStore, TaskRecord
 from .errors import ErrorCode, GatewayError
 from .evidence import EvidenceVerdict
 from .github import (
-    GitHubAPI, GitHubAppTokenProvider, WORKFLOW_ID, sanitize_logs,
+    GitHubAPI, GitHubAppTokenProvider, WORKFLOW_ID, sanitize_log_archive,
     read_with_backoff, select_unique_run, validate_run,
 )
 from .state import TaskStatus
@@ -22,7 +22,8 @@ class T14BService:
     def __init__(self, store: GatewayStore, token_provider: GitHubAppTokenProvider,
                  github: GitHubAPI, *, repository: str,
                  workflow_id: str = WORKFLOW_ID, evidence_ref_prefix: str = "evidence/",
-                 sleep=time.sleep, max_concurrent_reads: int = 4):
+                 sleep=time.sleep, max_concurrent_reads: int = 4,
+                 max_concurrent_artifacts: int = 2):
         self.store = store
         self.token_provider = token_provider
         self.github = github
@@ -30,9 +31,12 @@ class T14BService:
         self.workflow_id = workflow_id
         self.evidence_ref_prefix = evidence_ref_prefix
         self.sleep = sleep
-        if max_concurrent_reads <= 0:
-            raise ValueError("max_concurrent_reads must be positive")
+        if max_concurrent_reads <= 0 or max_concurrent_artifacts <= 0:
+            raise ValueError("concurrency limits must be positive")
         self._read_slots = threading.BoundedSemaphore(max_concurrent_reads)
+        self._artifact_slots = threading.BoundedSemaphore(max_concurrent_artifacts)
+        self._artifact_lock_guard = threading.Lock()
+        self._artifact_locks: dict[str, threading.Lock] = {}
 
     def _read(self, operation):
         if not self._read_slots.acquire(timeout=1.0):
@@ -47,7 +51,8 @@ class T14BService:
                 or not verdict.target_version or not verdict.snapshot_digest
                 or not verdict.plan_digest):
             raise GatewayError(ErrorCode.BUILD_BLOCKED, 409)
-        dispatch_ref = f"{self.evidence_ref_prefix}{task.request_id}"
+        external_task_id = self.store.external_task_id(task.internal_task_id)
+        dispatch_ref = f"{self.evidence_ref_prefix}{external_task_id}"
         intent, _ = self.store.create_dispatch_intent(
             task, trusted_code_commit_sha=verdict.trusted_code_commit_sha,
             workflow_id=self.workflow_id, dispatch_ref=dispatch_ref,
@@ -73,6 +78,7 @@ class T14BService:
                 token, self.repository, self.workflow_id, claimed.dispatch_ref,
                 {
                     "request_id": task.request_id,
+                    "gateway_task_id": claimed.external_task_id,
                     "snapshot_ref": f"evidence/requests/{task.request_id}",
                     "target_version": claimed.target_version,
                     "strict_mode": True,
@@ -201,16 +207,34 @@ class T14BService:
     def verify_artifact(self, task: TaskRecord) -> TaskRecord:
         if task.status != TaskStatus.VERIFYING_ARTIFACT:
             raise GatewayError(ErrorCode.ARTIFACT_UNVERIFIED, 409)
-        intent = self._intent(task)
-        token = self.token_provider.get()
-        download = self._read(
-            lambda: self.github.artifact_zip(
-                token, self.repository, int(intent.github_run_id),
-                int(intent.github_run_attempt),
+        with self._artifact_lock_guard:
+            lock = self._artifact_locks.setdefault(
+                task.internal_task_id, threading.Lock()
             )
-        )
+        if not lock.acquire(timeout=1.0):
+            raise GatewayError(ErrorCode.UPSTREAM_UNAVAILABLE, 503)
+        if not self._artifact_slots.acquire(timeout=1.0):
+            lock.release()
+            raise GatewayError(ErrorCode.UPSTREAM_UNAVAILABLE, 503)
         try:
-            metadata = verify_artifact_zip(download, task, intent)
+            current = self.store.get_task(task.device_id, task.request_id)
+            if current.status != TaskStatus.VERIFYING_ARTIFACT:
+                return current
+            intent = self._intent(current)
+            token = self.token_provider.get()
+            download = self._read(
+                lambda: self.github.artifact_zip(
+                    token, self.repository, int(intent.github_run_id),
+                    int(intent.github_run_attempt),
+                )
+            )
+            try:
+                metadata = verify_artifact_zip(download, current, intent)
+            finally:
+                download.close()
+            return self.store.store_verified_artifact(
+                current, json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+            )
         except GatewayError as exc:
             if exc.code == ErrorCode.ARTIFACT_UNVERIFIED:
                 self.store.transition_task(
@@ -218,21 +242,30 @@ class T14BService:
                     failure_code=ErrorCode.ARTIFACT_UNVERIFIED, allow_t14b=True,
                 )
             raise
-        return self.store.store_verified_artifact(
-            task, json.dumps(metadata, sort_keys=True, separators=(",", ":"))
-        )
+        finally:
+            self._artifact_slots.release()
+            lock.release()
+            with self._artifact_lock_guard:
+                if not lock.locked():
+                    self._artifact_locks.pop(task.internal_task_id, None)
 
     def logs(self, task: TaskRecord) -> tuple[list[str], bool]:
         intent = self._intent(task)
         if not intent.github_run_id or not intent.github_run_attempt:
             raise GatewayError(ErrorCode.EVIDENCE_NOT_FOUND, 404)
         token = self.token_provider.get()
+        run = self._read(
+            lambda: self.github.get_run(token, self.repository, intent.github_run_id)
+        )
+        if run.repository != self.repository:
+            raise GatewayError(ErrorCode.RUN_IDENTITY_MISMATCH, 409)
+        validate_run(run, intent)
         raw = self._read(
-            lambda: self.github.sanitized_log_source(
+            lambda: self.github.log_archive(
                 token, self.repository, intent.github_run_id, intent.github_run_attempt
             )
         )
-        return sanitize_logs(raw)
+        return sanitize_log_archive(raw)
 
     def _intent(self, task: TaskRecord) -> DispatchIntent:
         intent = self.store.get_dispatch_intent(task.internal_task_id)

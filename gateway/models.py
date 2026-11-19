@@ -40,6 +40,7 @@ class BuildTaskResponse(BaseModel):
     build_input_digest: str
     repository: str
     evidence_commit_sha: str
+    gateway_task_id: str | None = None
     trusted_code_commit_sha: str | None = None
     github_run_id: int | None = None
     github_run_attempt: int | None = None

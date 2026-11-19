@@ -9,6 +9,7 @@ EVIDENCE_COMMIT="${EVIDENCE_COMMIT:-$TRUSTED_COMMIT}"
 WORKFLOW_RUNTIME_SHA="${WORKFLOW_RUNTIME_SHA:-$EVIDENCE_COMMIT}"
 RUN_ID="${GITHUB_RUN_ID:-1}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
+GATEWAY_TASK_ID="${GATEWAY_TASK_ID:-}"
 
 [[ -n "$BUILD_INPUT" && -n "$TRUSTED_REPOSITORY" && -n "$TRUSTED_COMMIT" ]] || {
   echo "Immutable BUILD_INPUT, TRUSTED_REPOSITORY, and TRUSTED_COMMIT are required; legacy analysis inputs cannot build." >&2
@@ -89,10 +90,15 @@ rm -rf "$REPO_ROOT/generated/firmware"
 mkdir -p "$REPO_ROOT/generated/firmware"
 cp "$PRIMARY" "$REPO_ROOT/generated/firmware/"
 
+PROVENANCE_ARGS=()
+if [[ -n "$GATEWAY_TASK_ID" ]]; then
+  PROVENANCE_ARGS+=(--gateway-task-id "$GATEWAY_TASK_ID")
+fi
 python3 scripts/generate-build-provenance.py \
   --input "$BUILD_INPUT" --repo-root "$REPO_ROOT" \
   --repository "$TRUSTED_REPOSITORY" --commit "$TRUSTED_COMMIT" \
   --evidence-commit "$EVIDENCE_COMMIT" --runtime-commit "$WORKFLOW_RUNTIME_SHA" \
+  "${PROVENANCE_ARGS[@]}" \
   --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
   --firmware "$REPO_ROOT/generated/firmware/$EXPECTED_IMAGE" \
   --output "$REPO_ROOT/generated/firmware/build-provenance-v2.json"

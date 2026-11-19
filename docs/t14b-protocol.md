@@ -13,7 +13,11 @@ immutable evidence-ref policy below. `flash_ready` is always `false`.
 - `evidence_commit_sha` is the later immutable commit containing the request
   evidence. It must descend from the trusted code commit and may change only
   `evidence/requests/<request_id>/` relative to that ancestor.
-- `dispatch_ref` is a server-configured dedicated ref that must resolve exactly
+- `gateway_task_id` is a globally unique, server-generated identifier derived
+  from the internal task UUID. It is independent of the device-controlled
+  `request_id` and is persisted before dispatch.
+- `dispatch_ref` is a server-controlled dedicated ref named from
+  `gateway_task_id` that must resolve exactly
   to the evidence commit immediately before dispatch. Clients cannot provide it.
 - `workflow_runtime_sha` is the run's `head_sha` and must equal the evidence
   commit.
@@ -30,8 +34,9 @@ validates the exact request using the trusted code commit. The workflow repeats
 the ancestry/protected-tree check before T13 or ImageBuilder.
 
 After dispatch the correlator validates repository, workflow ID,
-`workflow_dispatch` event, run ID, attempt, head SHA, ref, request ID, and Build
-Input digest. Ref movement or ambiguous candidates becomes `DISPATCH_UNKNOWN`;
+`workflow_dispatch` event, run ID, attempt, head SHA, ref, Gateway task ID, and
+Build Input digest. Run ID is globally unique in the fixed repository and may
+bind only one intent. Ref movement or ambiguous candidates becomes `DISPATCH_UNKNOWN`;
 it is never automatically redispatched.
 
 ## Evidence admission and owner deployment condition
@@ -57,7 +62,9 @@ held only in memory, and never stored, returned, or logged.
 ## Durable dispatch and recovery
 
 SQLite stores one intent per task before any GitHub call. Immutable identity
-includes request/digest/evidence/code/workflow/ref. States are `PENDING`,
+includes the server Gateway task ID plus request/digest/evidence/code/workflow/ref.
+The Gateway task ID flows through the dispatch Ref, Workflow input, Run Name,
+concurrency group, artifact name, and provenance. States are `PENDING`,
 `DISPATCHING`, `UNKNOWN`, `BOUND`, and `FAILED`. A worker claims an intent
 atomically; another worker cannot dispatch it.
 
@@ -68,7 +75,11 @@ exhaustion preserves the current durable state. Reconciliation accepts only one
 exact candidate. Zero or multiple matches require manual review and never cause
 a blind retry. On startup a never-claimed `PENDING` intent may be claimed once;
 an interrupted `DISPATCHING` intent first becomes `UNKNOWN`. Unknown and bound
-runs are then reconciled without creating another workflow run.
+runs are then reconciled without creating another workflow run. Synchronous
+GitHub adapters run outside the event loop in a bounded executor. If an HTTP
+deadline expires, the worker slot remains reserved until the underlying call
+finishes; Python cannot forcibly cancel that thread, so production transports
+must also enforce finite socket timeouts.
 
 ## Run, artifact, and log trust
 
@@ -86,20 +97,25 @@ ZIP inspection rejects traversal, duplicate names, symlinks, special files,
 excessive member/byte/ratio limits, missing provenance, and extra firmware.
 The verifier validates provenance schema and digest and recomputes firmware
 SHA256/size while binding repository, runtime SHA, request, Build Input,
-Snapshot, Plan, run ID, and attempt.
+Snapshot, Plan, Gateway task ID, run ID, and attempt. Artifact bytes are spooled
+with a hard download bound, firmware hashing is streamed, and verification is
+bounded globally and mutually exclusive per task.
 
 Project provenance is an internal evidence record, not a GitHub cryptographic
 Artifact Attestation. This implementation does not claim independent signature
 verification. Verified artifacts remain `flash_ready=false`.
 
-Artifact download adapters must return repository, run ID, attempt, expiry, and
-bytes. The Gateway rejects expired or mismatched envelopes before opening the
+Artifact download adapters must return repository, run ID, attempt, expiry,
+size, and a seekable bounded stream. The Gateway rejects expired or mismatched envelopes before opening the
 ZIP, then applies archive limits and verifies `build-provenance-v2.json` plus
 the firmware bytes. A failed integrity check is terminal `ARTIFACT_FAILED`.
 
-Logs are device-scoped, bounded UTF-8 text produced through a field/line
-allowlist with control characters removed. Raw archives, environment dumps,
-tokens, and arbitrary binary output are not exposed.
+Logs are fetched from GitHub's attempt-specific ZIP endpoint only after exact
+Run/attempt identity validation. Archive, member, expansion, compression ratio,
+line and output limits apply; only safe UTF-8 `.txt` members are accepted.
+Control characters, secret fields and standalone GitHub token patterns are
+redacted. Raw archives, environment dumps and arbitrary binary output are not
+exposed.
 
 ## API boundary
 

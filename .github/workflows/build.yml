@@ -28,14 +28,18 @@ on:
         description: Reviewed code ancestor bound by the Build Input
         required: false
         type: string
+      gateway_task_id:
+        description: Globally unique server-generated Gateway task identifier
+        required: false
+        type: string
 
-run-name: immutable-${{ inputs.request_id }}-${{ inputs.build_input_digest }}
+run-name: gateway-${{ inputs.gateway_task_id }}-${{ inputs.build_input_digest }}
 
 permissions:
   contents: read
 
 concurrency:
-  group: smart-upgrade-${{ inputs.request_id || github.run_id }}
+  group: smart-upgrade-${{ inputs.gateway_task_id || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -70,6 +74,7 @@ jobs:
           TARGET_VERSION: ${{ inputs.target_version }}
           BUILD_INPUT_DIGEST: ${{ inputs.build_input_digest }}
           TRUSTED_CODE_COMMIT: ${{ inputs.trusted_code_commit_sha }}
+          GATEWAY_TASK_ID: ${{ inputs.gateway_task_id }}
         run: |
           set -euo pipefail
           [[ -n "$REQUEST_ID" && "$REQUEST_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || {
@@ -81,6 +86,7 @@ jobs:
           [[ -n "$TARGET_VERSION" ]] || { echo "::error::target_version is required."; exit 2; }
           [[ "$BUILD_INPUT_DIGEST" =~ ^[a-f0-9]{64}$ ]] || { echo "::error::Invalid Build Input digest."; exit 2; }
           [[ "$TRUSTED_CODE_COMMIT" =~ ^[a-f0-9]{40}$ ]] || { echo "::error::Invalid trusted code commit."; exit 2; }
+          [[ "$GATEWAY_TASK_ID" =~ ^gw-[a-f0-9]{32}$ ]] || { echo "::error::Invalid Gateway task identity."; exit 2; }
           [[ -f "$SNAPSHOT_REF/build-input-v1.json" ]] || {
             echo "::error::Missing frozen build-input-v1.json."; exit 2;
           }
@@ -143,6 +149,7 @@ jobs:
           TRUSTED_COMMIT: ${{ inputs.trusted_code_commit_sha }}
           EVIDENCE_COMMIT: ${{ github.sha }}
           WORKFLOW_RUNTIME_SHA: ${{ github.sha }}
+          GATEWAY_TASK_ID: ${{ inputs.gateway_task_id }}
         run: scripts/build-image.sh
 
       - name: Validate artifact safety
@@ -159,7 +166,7 @@ jobs:
         if: ${{ success() && steps.artifact_safety.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
-          name: immutable-${{ inputs.request_id }}-${{ steps.evidence.outputs.digest }}-${{ github.run_attempt }}
+          name: gateway-${{ inputs.gateway_task_id }}-${{ steps.evidence.outputs.digest }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 14
           path: |

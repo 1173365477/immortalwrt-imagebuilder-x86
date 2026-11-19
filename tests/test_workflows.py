@@ -74,5 +74,6 @@ def test_build_workflow_has_no_strict_mode_or_legacy_build_bypass():
     assert "fetch-depth: 0" in text
     assert "git merge-base --is-ancestor" in text
     assert "git diff --name-only -z" in text
-    assert "run-name: immutable-${{ inputs.request_id }}-${{ inputs.build_input_digest }}" in text
+    assert "run-name: gateway-${{ inputs.gateway_task_id }}-${{ inputs.build_input_digest }}" in text
+    assert "group: smart-upgrade-${{ inputs.gateway_task_id || github.run_id }}" in text
 

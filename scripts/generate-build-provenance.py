@@ -21,6 +21,7 @@ def main() -> int:
     parser.add_argument("--commit", required=True)
     parser.add_argument("--evidence-commit")
     parser.add_argument("--runtime-commit")
+    parser.add_argument("--gateway-task-id")
     parser.add_argument("--run-id", type=int, required=True)
     parser.add_argument("--run-attempt", type=int, required=True)
     parser.add_argument("--firmware", type=Path, required=True)
@@ -42,6 +43,7 @@ def main() -> int:
         ]
         value = {
             "schema_version": "2.0.0", "provenance_id": "", "digest": "",
+            "gateway_task_id": args.gateway_task_id or f"gw-{context['build_input_digest'][:32]}",
             "request_id": context["request_id"],
             "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "build_input_id": context["build_input_id"],
