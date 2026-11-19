@@ -22,9 +22,9 @@ or claim flash safety. `flash_ready=false` remains invariant.
 | B08 artifact/provenance | PASS (synthetic ZIP) | Bounded streamed download and firmware hashing, reference-counted per-task lock entries and bounded verification concurrency; expiry/envelope, ZIP traversal/type/duplicate/size/ratio, v2 schema/digest, Gateway/run/request/Snapshot/Plan identity, firmware SHA256/size and `flash_ready=false` checks. |
 | B09 API | PASS | Idempotent POST and device-scoped task/artifact/log GET routes. `/targets` and `/analysis` remain documented as not implemented. |
 | B10 log safety | PASS | Attempt-specific GitHub log ZIP handling; archive/member/expanded/output bounds; path, type, duplicate, binary and UTF-8 checks; control removal plus secret-field and standalone GitHub-token redaction. Raw archives are not returned. |
-| B11 regression | PENDING CI | 304 tests collected after final remediation. Local non-platform-specific regression: 263 passed and 1 skipped. The prior 300-test Linux run remains green; authoritative final Linux CI, real apk-tools, actionlint, ShellCheck, Schema, online index and strict negative results are recorded after push. |
+| B11 regression | PASS | 304 tests collected after final remediation. Linux CI: 303 passed and 1 skipped; the separate pinned real apk-tools integration passed. actionlint, ShellCheck, YAML/Python/Schema checks, online index validation and strict negative gates passed. Local non-platform-specific regression: 263 passed and 1 skipped; macOS-only BSD `awk` failures remain an existing Linux-targeted fixture limitation. |
 
-Remediation CI evidence: <https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/44462365744>.
+Final re-review remediation CI evidence: <https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/44464449591>.
 
 ## Security proofs covered by tests
 
