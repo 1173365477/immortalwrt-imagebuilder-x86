@@ -15,16 +15,16 @@ or claim flash safety. `flash_ready=false` remains invariant.
 | B01 commit/ref protocol and threat model | PASS | Four distinct identities, ancestry and protected-tree checks are documented and exercised by a two-commit fixture. |
 | B02 GitHub App least privilege | PASS (adapter) | Fixed installation/repository, exact Metadata Read / Contents Read / Actions Write permission set, expiry refresh, memory-only token and canary scans. Production issuer is intentionally not configured. |
 | B03 immutable evidence resolver | PASS (controlled fetcher) | Full commit checkout, fixed repository, bounded files/bytes, unsafe type rejection, duplicate-safe JSON, T13 output identity binding. |
-| B04 durable dispatch intent | PASS | SQLite unique intent, server-generated globally unique `gateway_task_id`, transaction-before-side-effect, atomic worker claim, globally unique GitHub Run binding, persistent identity, transition audit, concurrent replay tests. |
+| B04 durable dispatch intent | PASS | SQLite unique intent, server-generated globally unique `gateway_task_id`, transaction-before-side-effect, expiry checks inside both intent creation and atomic claim transactions, globally unique GitHub Run binding, persistent identity, transition audit, concurrent replay tests. |
 | B05 workflow dispatch and run binding | PASS (Mock API) | The Gateway identity is bound through Ref, Workflow input, Run Name, concurrency group, artifact name and provenance. Exact repository/workflow/event/ref/SHA/Gateway identity/digest/attempt checks prevent cross-device Run reuse for both explicit and legacy dispatch responses. No production dispatch occurred. |
-| B06 state and recovery | PASS | Fail-closed transition table; startup distinguishes never-claimed `PENDING` from ambiguous `DISPATCHING`; unknown dispatch is reconciled without redispatch. Recovery isolates each record, retains expired task/intent audit identity without network activity or redispatch, and continues after expired or corrupt records. |
+| B06 state and recovery | PASS | Fail-closed transition table; startup distinguishes never-claimed `PENDING` from ambiguous `DISPATCHING`; unknown dispatch is reconciled without redispatch. Recovery isolates each record and rechecks expiry atomically at Claim. A final transactional deadline authorization occurs after Ref resolution and immediately before Dispatch; proven pre-call expiry becomes audited `FAILED/REQUEST_EXPIRED`, while an attempted or ambiguous external call remains `DISPATCH_UNKNOWN`. |
 | B07 run polling | PASS | Queued/running/terminal mapping, attempt pinning, no state regression, bounded read retry/backoff, persisted reconciliation time and request quotas. |
 | B08 artifact/provenance | PASS (synthetic ZIP) | Bounded streamed download and firmware hashing, reference-counted per-task lock entries and bounded verification concurrency; expiry/envelope, ZIP traversal/type/duplicate/size/ratio, v2 schema/digest, Gateway/run/request/Snapshot/Plan identity, firmware SHA256/size and `flash_ready=false` checks. |
 | B09 API | PASS | Idempotent POST and device-scoped task/artifact/log GET routes. `/targets` and `/analysis` remain documented as not implemented. |
 | B10 log safety | PASS | Attempt-specific GitHub log ZIP handling; archive/member/expanded/output bounds; path, type, duplicate, binary and UTF-8 checks; control removal plus secret-field and standalone GitHub-token redaction. Raw archives are not returned. |
-| B11 regression | PASS | 304 tests collected after final remediation. Linux CI: 303 passed and 1 skipped; the separate pinned real apk-tools integration passed. actionlint, ShellCheck, YAML/Python/Schema checks, online index validation and strict negative gates passed. Local non-platform-specific regression: 263 passed and 1 skipped; macOS-only BSD `awk` failures remain an existing Linux-targeted fixture limitation. |
+| B11 regression | PENDING CI | 311 tests collected after P3 remediation. The previous 304-test Linux run remains green. Final Linux pytest, real apk-tools, actionlint, ShellCheck, YAML/Python/Schema, online index and strict negative results are recorded after push. |
 
-Final re-review remediation CI evidence: <https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/44464449591>.
+Previous re-review CI evidence: <https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/44524469564>.
 
 ## Security proofs covered by tests
 
@@ -57,6 +57,12 @@ Final re-review remediation CI evidence: <https://github.com/1173365477/immortal
     reference-counted lock entry before waiting. Cleanup occurs only after the
     last registered user exits, including a failed verifier followed by two
     concurrent waiters; all callers observe one terminal task state.
+15. Expiry is enforced independently at intent creation, atomic Claim, and the
+    final pre-Dispatch authorization. Exact-boundary and eight-worker tests
+    prove that an expired task cannot be created or claimed for Dispatch. If a
+    claimed task expires during Ref resolution, the database atomically records
+    `FAILED/REQUEST_EXPIRED` before any external call. Once a Dispatch has been
+    attempted, ambiguity remains `DISPATCH_UNKNOWN` and cannot be redispatched.
 
 ## Workflow and provenance compatibility
 

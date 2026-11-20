@@ -71,6 +71,7 @@ class T14BService:
         return self._dispatch_claimed(task, claimed)
 
     def _dispatch_claimed(self, task: TaskRecord, claimed: DispatchIntent) -> TaskRecord:
+        dispatch_attempted = False
         try:
             token = self.token_provider.get()
             resolved = self._read(
@@ -80,6 +81,11 @@ class T14BService:
             )
             if resolved != task.evidence_commit_sha:
                 raise GatewayError(ErrorCode.DISPATCH_UNKNOWN, 409)
+            # No token acquisition, queue wait, network read, or other blocking
+            # operation may occur between this transactional deadline check and
+            # the dispatch invocation.
+            self.store.authorize_dispatch_attempt(claimed.dispatch_intent_id)
+            dispatch_attempted = True
             response = self.github.dispatch(
                 token, self.repository, self.workflow_id, claimed.dispatch_ref,
                 {
@@ -114,13 +120,14 @@ class T14BService:
             self.store.bind_dispatch_run(
                 claimed.dispatch_intent_id, run.run_id, run.run_attempt
             )
-            return self.store.get_task(task.device_id, task.request_id)
+            return self.store.get_task_for_recovery(task.internal_task_id)
         except Exception as exc:
+            if (not dispatch_attempted and isinstance(exc, GatewayError)
+                    and exc.code == ErrorCode.REQUEST_EXPIRED):
+                return self.store.get_task_for_recovery(task.internal_task_id)
             # Once DISPATCHING, every transport/error result is externally ambiguous.
             self.store.mark_dispatch_unknown(claimed.dispatch_intent_id)
-            if isinstance(exc, GatewayError):
-                return self.store.get_task(task.device_id, task.request_id)
-            return self.store.get_task(task.device_id, task.request_id)
+            return self.store.get_task_for_recovery(task.internal_task_id)
 
     def recover_startup(self) -> dict[str, int]:
         """Reconcile durable work without ever blindly redispatching ambiguity."""
@@ -153,6 +160,11 @@ class T14BService:
                 elif task.status == TaskStatus.VERIFYING_ARTIFACT:
                     self.verify_artifact(task)
                     summary["artifact"] += 1
+            except GatewayError as exc:
+                if exc.code == ErrorCode.REQUEST_EXPIRED:
+                    summary["expired"] += 1
+                else:
+                    summary["deferred"] += 1
             except Exception:
                 # One corrupt or temporarily unavailable record must not abort
                 # recovery of unrelated tasks. Preserve its durable state for

@@ -68,6 +68,16 @@ concurrency group, artifact name, and provenance. States are `PENDING`,
 `DISPATCHING`, `UNKNOWN`, `BOUND`, and `FAILED`. A worker claims an intent
 atomically; another worker cannot dispatch it.
 
+Task expiry is part of the same `BEGIN IMMEDIATE` transaction that creates an
+intent or changes `PENDING` to `DISPATCHING`; `now >= expires_at` fails closed.
+After token acquisition and Ref resolution, the Gateway performs one final
+transactional deadline authorization immediately before calling GitHub. No
+queue wait, token operation, network read, or other blocking operation occurs
+between that authorization and the Dispatch invocation. A task proven expired
+at this point is atomically recorded as task `FAILED` and intent `FAILED` with
+`REQUEST_EXPIRED`, preserving its immutable evidence and audit history without
+calling GitHub or returning to `PENDING`.
+
 Timeout, connection loss, an ambiguous dispatch response, or a local failure
 after the external call becomes `UNKNOWN`. Dispatch itself is never retried.
 Read-only operations use bounded exponential backoff and `Retry-After` for 429;

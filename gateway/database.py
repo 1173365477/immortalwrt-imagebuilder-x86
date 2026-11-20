@@ -584,6 +584,16 @@ class GatewayStore:
         try:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                current_row = connection.execute(
+                    "SELECT * FROM build_tasks WHERE internal_task_id=?", (task.internal_task_id,)
+                ).fetchone()
+                if current_row is None:
+                    connection.rollback()
+                    raise GatewayError(ErrorCode.INTERNAL_ERROR, 500)
+                current = TaskRecord.from_row(current_row)
+                if timestamp >= current.expires_at:
+                    connection.rollback()
+                    raise GatewayError(ErrorCode.REQUEST_EXPIRED, 410)
                 row = connection.execute(
                     "SELECT * FROM dispatch_intents WHERE internal_task_id=?",
                     (task.internal_task_id,),
@@ -603,10 +613,6 @@ class GatewayStore:
                         raise GatewayError(ErrorCode.IDEMPOTENCY_CONFLICT, 409)
                     connection.commit()
                     return intent, False
-                current_row = connection.execute(
-                    "SELECT * FROM build_tasks WHERE internal_task_id=?", (task.internal_task_id,)
-                ).fetchone()
-                current = TaskRecord.from_row(current_row)
                 if current.status != TaskStatus.VALIDATED:
                     connection.rollback()
                     raise GatewayError(ErrorCode.BUILD_BLOCKED, 409)
@@ -678,6 +684,9 @@ class GatewayStore:
                 task = TaskRecord.from_row(connection.execute(
                     "SELECT * FROM build_tasks WHERE internal_task_id=?", (row["internal_task_id"],)
                 ).fetchone())
+                if timestamp >= task.expires_at:
+                    connection.rollback()
+                    raise GatewayError(ErrorCode.REQUEST_EXPIRED, 410)
                 connection.execute(
                     """UPDATE dispatch_intents SET dispatch_state='DISPATCHING',
                        dispatch_requested_at=?, version=version+1
@@ -690,6 +699,49 @@ class GatewayStore:
                 ).fetchone()
                 connection.commit()
                 return DispatchIntent.from_row(result)
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def authorize_dispatch_attempt(
+        self, intent_id: str, *, now: int | None = None,
+    ) -> DispatchIntent:
+        """Atomically fail expiry immediately before the external side effect."""
+        timestamp = int(time.time() if now is None else now)
+        expired = False
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT * FROM dispatch_intents WHERE dispatch_intent_id=?", (intent_id,)
+                ).fetchone()
+                if row is None or row["dispatch_state"] != "DISPATCHING":
+                    connection.rollback()
+                    raise GatewayError(ErrorCode.DISPATCH_UNKNOWN, 409)
+                task = TaskRecord.from_row(connection.execute(
+                    "SELECT * FROM build_tasks WHERE internal_task_id=?",
+                    (row["internal_task_id"],),
+                ).fetchone())
+                if timestamp >= task.expires_at:
+                    connection.execute(
+                        """UPDATE dispatch_intents
+                           SET dispatch_state='FAILED', failure_code=?, version=version+1
+                           WHERE dispatch_intent_id=? AND dispatch_state='DISPATCHING'""",
+                        (ErrorCode.REQUEST_EXPIRED.value, intent_id),
+                    )
+                    self._transition_in_transaction(
+                        connection, task, TaskStatus.FAILED, timestamp,
+                        failure_code=ErrorCode.REQUEST_EXPIRED,
+                    )
+                    expired = True
+                result = connection.execute(
+                    "SELECT * FROM dispatch_intents WHERE dispatch_intent_id=?", (intent_id,)
+                ).fetchone()
+                connection.commit()
+            if expired:
+                raise GatewayError(ErrorCode.REQUEST_EXPIRED, 410)
+            return DispatchIntent.from_row(result)
+        except GatewayError:
+            raise
         except sqlite3.Error as exc:
             raise self._storage_error(exc) from exc
 

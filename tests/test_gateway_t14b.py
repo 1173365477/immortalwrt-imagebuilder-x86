@@ -675,6 +675,176 @@ def test_startup_recovery_never_claims_expired_pending_dispatch(tmp_path):
     assert persisted.github_run_id is None
 
 
+def test_expired_task_cannot_create_dispatch_intent(tmp_path):
+    store, _, api, _ = service(tmp_path)
+    task = validated_task(store)
+    with pytest.raises(GatewayError) as raised:
+        store.create_dispatch_intent(
+            task, trusted_code_commit_sha=CODE, workflow_id=WORKFLOW,
+            dispatch_ref=f"evidence/{store.external_task_id(task.internal_task_id)}",
+            snapshot_digest="1" * 64, plan_digest="2" * 64,
+            target_version="25.12.2", now=task.expires_at,
+        )
+    assert raised.value.code == ErrorCode.REQUEST_EXPIRED
+    assert store.get_dispatch_intent(task.internal_task_id) is None
+    assert store.get_task_for_recovery(task.internal_task_id).status == TaskStatus.VALIDATED
+    assert api.dispatch_calls == 0
+
+
+def test_expired_pending_intent_cannot_be_claimed_atomically(tmp_path):
+    store, _, api, _ = service(tmp_path)
+    task = validated_task(store)
+    intent, _ = store.create_dispatch_intent(
+        task, trusted_code_commit_sha=CODE, workflow_id=WORKFLOW,
+        dispatch_ref=f"evidence/{store.external_task_id(task.internal_task_id)}",
+        snapshot_digest="1" * 64, plan_digest="2" * 64, target_version="25.12.2",
+    )
+    with pytest.raises(GatewayError) as raised:
+        store.claim_dispatch(intent.dispatch_intent_id, now=task.expires_at)
+    assert raised.value.code == ErrorCode.REQUEST_EXPIRED
+    assert store.get_dispatch_intent(task.internal_task_id).dispatch_state == "PENDING"
+    assert store.get_task_for_recovery(task.internal_task_id).status == TaskStatus.DISPATCH_PENDING
+    assert api.dispatch_calls == 0
+
+
+def test_normal_dispatch_path_fails_if_task_expires_before_claim(tmp_path, monkeypatch):
+    store, _, api, worker = service(tmp_path)
+    task = validated_task(store)
+    original = store.claim_dispatch
+    monkeypatch.setattr(
+        store, "claim_dispatch",
+        lambda intent_id: original(intent_id, now=task.expires_at),
+    )
+    with pytest.raises(GatewayError) as raised:
+        worker.dispatch(task, TrustedVerifier().verify(request()))
+    assert raised.value.code == ErrorCode.REQUEST_EXPIRED
+    assert api.dispatch_calls == 0
+    intent = store.get_dispatch_intent(task.internal_task_id)
+    assert intent.dispatch_state == "PENDING"
+    assert store.get_task_for_recovery(task.internal_task_id).status == TaskStatus.DISPATCH_PENDING
+
+
+def test_recovery_expiry_between_check_and_claim_does_not_dispatch(
+    tmp_path, monkeypatch
+):
+    store, _, api, worker = service(tmp_path)
+    expired = validated_task(store, build_request=request(request_id="boundary"))
+    expired_intent, _ = store.create_dispatch_intent(
+        expired, trusted_code_commit_sha=CODE, workflow_id=WORKFLOW,
+        dispatch_ref=f"evidence/{store.external_task_id(expired.internal_task_id)}",
+        snapshot_digest="1" * 64, plan_digest="2" * 64, target_version="25.12.2",
+    )
+    healthy = validated_task(store, build_request=request(request_id="healthy"))
+    healthy_intent, _ = store.create_dispatch_intent(
+        healthy, trusted_code_commit_sha=CODE, workflow_id=WORKFLOW,
+        dispatch_ref=f"evidence/{store.external_task_id(healthy.internal_task_id)}",
+        snapshot_digest="1" * 64, plan_digest="2" * 64, target_version="25.12.2",
+    )
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE dispatch_intents SET dispatch_requested_at=1 WHERE dispatch_intent_id=?",
+            (expired_intent.dispatch_intent_id,),
+        )
+        connection.execute(
+            "UPDATE dispatch_intents SET dispatch_requested_at=2 WHERE dispatch_intent_id=?",
+            (healthy_intent.dispatch_intent_id,),
+        )
+    original = store.claim_dispatch
+
+    def claim_at_boundary(intent_id):
+        if intent_id == expired_intent.dispatch_intent_id:
+            return original(intent_id, now=expired.expires_at)
+        return original(intent_id, now=healthy.created_at)
+
+    monkeypatch.setattr(store, "claim_dispatch", claim_at_boundary)
+    api.response = DispatchResponse(102)
+    summary = worker.recover_startup()
+    assert summary["expired"] == 1
+    assert summary["pending"] == 1
+    assert api.dispatch_calls == 1
+    assert store.get_dispatch_intent(expired.internal_task_id).dispatch_state == "PENDING"
+    assert store.get_dispatch_intent(healthy.internal_task_id).dispatch_state == "BOUND"
+
+
+def test_claimed_task_expiring_after_ref_resolution_fails_before_dispatch(
+    tmp_path, monkeypatch
+):
+    store, _, api, worker = service(tmp_path)
+    task = validated_task(store)
+    intent, _ = store.create_dispatch_intent(
+        task, trusted_code_commit_sha=CODE, workflow_id=WORKFLOW,
+        dispatch_ref=f"evidence/{store.external_task_id(task.internal_task_id)}",
+        snapshot_digest="1" * 64, plan_digest="2" * 64, target_version="25.12.2",
+    )
+    claimed = store.claim_dispatch(intent.dispatch_intent_id, now=task.expires_at - 1)
+    original = store.authorize_dispatch_attempt
+    monkeypatch.setattr(
+        store, "authorize_dispatch_attempt",
+        lambda intent_id: original(intent_id, now=task.expires_at),
+    )
+    result = worker._dispatch_claimed(task, claimed)
+    persisted = store.get_dispatch_intent(task.internal_task_id)
+    assert api.dispatch_calls == 0
+    assert result.status == TaskStatus.FAILED
+    assert result.failure_code == ErrorCode.REQUEST_EXPIRED.value
+    assert persisted.dispatch_state == "FAILED"
+    assert persisted.failure_code == ErrorCode.REQUEST_EXPIRED.value
+    assert persisted.github_run_id is None
+    assert store.claim_dispatch(intent.dispatch_intent_id, now=task.expires_at + 1) is None
+
+
+def test_unknown_dispatch_that_later_expires_is_never_redispatched(tmp_path):
+    api = MockGitHub()
+    api.raise_after_dispatch = True
+    store, _, _, worker = service(tmp_path, api)
+    task = worker.dispatch(validated_task(store), TrustedVerifier().verify(request()))
+    assert task.status == TaskStatus.DISPATCH_UNKNOWN
+    assert api.dispatch_calls == 1
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE build_tasks SET expires_at=1 WHERE internal_task_id=?",
+            (task.internal_task_id,),
+        )
+    restarted = T14BService(
+        GatewayStore(store.path),
+        GitHubAppTokenProvider(Issuer(), installation_id=7, repository=REPOSITORY),
+        api, repository=REPOSITORY,
+    )
+    restarted.store.initialize()
+    summary = restarted.recover_startup()
+    assert summary["expired"] == 1
+    assert api.dispatch_calls == 1
+    persisted = restarted.store.get_dispatch_intent(task.internal_task_id)
+    assert persisted.dispatch_state == "UNKNOWN"
+    assert persisted.external_task_id.startswith("gw-")
+
+
+def test_concurrent_workers_cannot_claim_at_expiry_boundary(tmp_path):
+    store, _, api, _ = service(tmp_path)
+    task = validated_task(store)
+    intent, _ = store.create_dispatch_intent(
+        task, trusted_code_commit_sha=CODE, workflow_id=WORKFLOW,
+        dispatch_ref=f"evidence/{store.external_task_id(task.internal_task_id)}",
+        snapshot_digest="1" * 64, plan_digest="2" * 64, target_version="25.12.2",
+    )
+    barrier = threading.Barrier(8)
+
+    def claim(_):
+        barrier.wait(timeout=2)
+        try:
+            return store.claim_dispatch(intent.dispatch_intent_id, now=task.expires_at)
+        except GatewayError as exc:
+            assert exc.code == ErrorCode.REQUEST_EXPIRED
+            return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        claims = list(pool.map(claim, range(8)))
+    assert all(item is None for item in claims)
+    assert store.get_dispatch_intent(task.internal_task_id).dispatch_state == "PENDING"
+    assert store.get_task_for_recovery(task.internal_task_id).status == TaskStatus.DISPATCH_PENDING
+    assert api.dispatch_calls == 0
+
+
 def test_api_dispatch_artifact_logs_and_device_isolation(tmp_path):
     settings = GatewaySettings(
         database_path=tmp_path / "gateway.db", trusted_repository=REPOSITORY,
