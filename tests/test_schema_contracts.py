@@ -45,7 +45,8 @@ VALID_PLAN = {
 VALID_BUILD = {
     "schema_version": "1.0.0", "build_id": URN, "request_id": "request-1", "source_plan_id": URN, "source_plan_digest": HEX,
     "status": "failed", "build_allowed": False, "flash_ready": False, "target_version": "25.12.2",
-    "trace": {"repository": "owner/repo", "commit_sha": "b" * 40, "workflow_run_id": 1, "workflow_run_attempt": 1},
+    "trace": {"repository": "owner/repo", "commit_sha": "b" * 40,
+              "workflow_run_id": 1, "workflow_run_attempt": 1},
     "artifacts": [], "blockers": [], "warnings": [], "errors": ["build failed"]
 }
 

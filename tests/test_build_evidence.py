@@ -13,8 +13,9 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from build_evidence import EvidenceError, canonical_digest, sha256_file, tree_digest, verify_build_input
-from gateway.evidence import SubprocessT13Verifier
+from gateway.evidence import CommitBoundT13Verifier, SubprocessT13Verifier
 from gateway.models import BuildRequest
+from gateway.resolver import EvidenceResolver, LocalRepositoryFetcher
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,7 +32,7 @@ def frozen_request(tmp_path: Path) -> tuple[Path, dict]:
     repo = tmp_path / "repo"
     (repo / "schemas").mkdir(parents=True)
     (repo / "config").mkdir()
-    for name in ("build-input-v1.json", "system-snapshot-v1.json", "migration-plan-v1.json", "build-provenance-v1.json"):
+    for name in ("build-input-v1.json", "system-snapshot-v1.json", "migration-plan-v1.json", "build-provenance-v1.json", "build-provenance-v2.json"):
         shutil.copy2(ROOT / "schemas" / name, repo / "schemas" / name)
     shutil.copy2(ROOT / "config/thirdparty.yml", repo / "config/thirdparty.yml")
     shutil.copy2(ROOT / "config/apk-tools-policy.json", repo / "config/apk-tools-policy.json")
@@ -271,6 +272,56 @@ def test_gateway_binds_real_t13_context_to_requested_digest(tmp_path, monkeypatc
     assert verdict.trusted is False
 
 
+def test_t14b_code_ancestor_and_evidence_commit_are_separate(tmp_path, monkeypatch):
+    path, value = frozen_request(tmp_path)
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    shutil.copy2(ROOT / "scripts/verify-build-input.py", scripts / "verify-build-input.py")
+    shutil.copy2(ROOT / "scripts/build_evidence.py", scripts / "build_evidence.py")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Gateway Test"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "trusted code"], cwd=repo, check=True)
+    trusted = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True, capture_output=True, check=True
+    ).stdout.strip()
+    value["build"]["git_commit_sha"] = trusted
+    value["build"]["config_digest"] = canonical_digest(value["build"], ("config_digest",))
+    rewrite_input(path, value)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "reviewed evidence"], cwd=repo, check=True)
+    evidence = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True, capture_output=True, check=True
+    ).stdout.strip()
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}:{os.environ['PATH']}")
+    request = BuildRequest(
+        request_id="request-1", build_input_id=value["build_input_id"],
+        build_input_digest=value["digest"], repository=REPOSITORY,
+        evidence_commit_sha=evidence,
+    )
+    verifier = CommitBoundT13Verifier(repo, REPOSITORY)
+    verdict = verifier.verify(request)
+    assert verdict.trusted is True
+    assert verdict.trusted_code_commit_sha == trusted
+    assert verdict.evidence_commit_sha == evidence
+
+    resolved = EvidenceResolver(
+        LocalRepositoryFetcher(REPOSITORY, repo), repository=REPOSITORY
+    ).verify(request)
+    assert resolved.trusted is True
+
+    (repo / "README-protected").write_text("changed outside evidence\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "unsafe protected change"], cwd=repo, check=True)
+    unsafe = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True, capture_output=True, check=True
+    ).stdout.strip()
+    forged = request.model_copy(update={"evidence_commit_sha": unsafe})
+    assert verifier.verify(forged).trusted is False
+
+
 def test_thirdparty_bytes_metadata_dependencies_and_target_are_bound(tmp_path):
     path, value = frozen_request(tmp_path)
     add_openclash_provider(path, value)
@@ -418,7 +469,7 @@ def test_verifier_cli_and_provenance_use_actual_artifact_bytes(tmp_path):
     firmware = repo / "generated/firmware.img.gz"
     firmware.parent.mkdir()
     firmware.write_bytes(b"actual firmware bytes")
-    provenance = repo / "generated/build-provenance-v1.json"
+    provenance = repo / "generated/build-provenance-v2.json"
     result = subprocess.run([
         sys.executable, str(ROOT / "scripts/generate-build-provenance.py"), "--input", str(path),
         "--repo-root", str(repo), "--repository", REPOSITORY, "--commit", COMMIT,
@@ -427,7 +478,7 @@ def test_verifier_cli_and_provenance_use_actual_artifact_bytes(tmp_path):
     ], text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr
     value = json.loads(provenance.read_text())
-    Draft202012Validator(json.loads((repo / "schemas/build-provenance-v1.json").read_text())).validate(value)
+    Draft202012Validator(json.loads((repo / "schemas/build-provenance-v2.json").read_text())).validate(value)
     assert value["artifact"]["sha256"] == sha256_file(firmware)
     assert value["flash_ready"] is False
 

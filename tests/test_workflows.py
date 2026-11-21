@@ -23,7 +23,7 @@ def test_existing_build_inputs_and_artifact_names_remain_compatible():
     legacy_inputs = workflow("build-legacy.yml")[True]["workflow_dispatch"]["inputs"]
     for name in ("immortalwrt_version", "report_path", "include_openclash", "openclash_version", "include_nikki", "include_lucky", "rootfs_size", "create_release", "strict_mode"):
         assert name in legacy_inputs
-    for name in ("request_id", "snapshot_ref", "target_version"):
+    for name in ("request_id", "snapshot_ref", "target_version", "build_input_digest", "trusted_code_commit_sha"):
         assert name in inputs
     text = (ROOT / ".github/workflows/build.yml").read_text()
     assert "generated/firmware/" in text
@@ -71,4 +71,9 @@ def test_build_workflow_has_no_strict_mode_or_legacy_build_bypass():
     assert "validate-manifest.py" not in text
     assert "fetch-thirdparty.py" not in text
     assert "cancel-in-progress: false" in text
+    assert "fetch-depth: 0" in text
+    assert "git merge-base --is-ancestor" in text
+    assert "git diff --name-only -z" in text
+    assert "run-name: gateway-${{ inputs.gateway_task_id }}-${{ inputs.build_input_digest }}" in text
+    assert "group: smart-upgrade-${{ inputs.gateway_task_id || github.run_id }}" in text
 

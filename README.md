@@ -20,17 +20,19 @@ T13 起，Build workflow 不再现场解析 `latest`、旧报告或第三方 Rel
 
 旧 `workflow_dispatch` 参数因 GitHub 单工作流 10 输入上限，原样保留在 **Legacy build request compatibility** 只读入口；该入口只会明确停止并提示先运行分析流程。`strict_mode=false`、`latest`、旧 `system-analysis.json`、任意 URL 或可变 Git ref 均不能授权构建。完整协议见 [T13 immutable build protocol](docs/t13-immutable-build.md)。
 
-## 安全构建网关基础（T14-A）
+## 安全构建网关（T14-A / T14-B）
 
-`gateway/` 提供一个默认拒绝、设备身份隔离、SQLite 持久化的 Gateway
-基础接口。它只接受固定仓库、完整 Commit SHA 和 T13 Build Input 身份，
-通过事务唯一约束实现跨重启幂等，并始终返回
-`dispatch_allowed=false`、`flash_ready=false`。T14-A 不连接 GitHub API、
-不触发 Actions，也不提供 Artifact 或日志的虚假成功接口。
+`gateway/` 提供一个默认拒绝、设备身份隔离、SQLite 持久化的 Gateway。
+T14-B 增加固定仓库/Workflow 的 GitHub App 适配边界、先持久化再派发的
+Intent、未知结果对账、Run ID/Attempt 绑定、Artifact 字节验证与脱敏日志。
+生产派发开关默认关闭；本仓库的测试只使用 Mock GitHub API，不创建 App、
+不写入生产凭证，也不触发真实固件构建。所有响应仍保持
+`dispatch_allowed=false`、`flash_ready=false`。
 
 威胁模型、认证生命周期、API、数据库、状态机和 T14-B 接口边界见
 [Gateway threat model](docs/t14-gateway-threat-model.md) 与
-[Gateway API contract](docs/t14-gateway-api.md)。路由器凭证只用于 Gateway，
+[Gateway API contract](docs/t14-gateway-api.md)，不可变派发协议见
+[T14-B protocol](docs/t14b-protocol.md)。路由器凭证只用于 Gateway，
 不是 GitHub Token；GitHub App 私钥和 Installation Token 永远不会下发到路由器。
 
 ## 工作流
@@ -41,7 +43,7 @@ T13 起，Build workflow 不再现场解析 `latest`、旧报告或第三方 Rel
        └─ Migration Plan（build_allowed 安全结论）
             └─ build-input-v1.json（冻结全部证据与字节摘要）
                  └─ Verify + private staging
-                      └─ ImageBuilder → firmware + build-provenance-v1.json
+                      └─ ImageBuilder → firmware + build-provenance-v2.json
 ```
 
 `Analyze migration report` 仍可生成历史兼容报告；它不能直接授权 Build。正式构建必须由经过审查并提交的不可变请求驱动。

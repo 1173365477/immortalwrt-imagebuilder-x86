@@ -14,10 +14,10 @@ from pathlib import Path
 
 from .errors import ErrorCode, GatewayError
 from .models import BuildRequest
-from .state import TaskStatus, ensure_t14a_transition
+from .state import TaskStatus, ensure_t14a_transition, ensure_t14b_transition
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 SCRYPT_N = 1 << 14
 SCRYPT_R = 8
 SCRYPT_P = 1
@@ -53,6 +53,36 @@ class TaskRecord:
         values = dict(row)
         values["status"] = TaskStatus(values["status"])
         return cls(**values)
+
+
+@dataclass(frozen=True)
+class DispatchIntent:
+    dispatch_intent_id: str
+    internal_task_id: str
+    device_id: str
+    request_id: str
+    external_task_id: str
+    build_input_digest: str
+    evidence_commit_sha: str
+    trusted_code_commit_sha: str
+    trusted_workflow_id: str
+    dispatch_ref: str
+    expected_runtime_sha: str
+    snapshot_digest: str
+    plan_digest: str
+    target_version: str
+    dispatch_state: str
+    github_run_id: int | None
+    github_run_attempt: int | None
+    dispatch_requested_at: int | None
+    last_reconciled_at: int | None
+    retry_count: int
+    failure_code: str | None
+    version: int
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "DispatchIntent":
+        return cls(**dict(row))
 
 
 class GatewayStore:
@@ -136,7 +166,37 @@ class GatewayStore:
                         count INTEGER NOT NULL,
                         PRIMARY KEY(device_id, endpoint, window_start)
                     );
-                    INSERT INTO gateway_meta(key, value) VALUES('schema_version', '1')
+                    CREATE TABLE IF NOT EXISTS dispatch_intents (
+                        dispatch_intent_id TEXT PRIMARY KEY,
+                        internal_task_id TEXT NOT NULL UNIQUE REFERENCES build_tasks(internal_task_id),
+                        device_id TEXT NOT NULL,
+                        request_id TEXT NOT NULL,
+                        external_task_id TEXT NOT NULL UNIQUE,
+                        build_input_digest TEXT NOT NULL,
+                        evidence_commit_sha TEXT NOT NULL,
+                        trusted_code_commit_sha TEXT NOT NULL,
+                        trusted_workflow_id TEXT NOT NULL,
+                        dispatch_ref TEXT NOT NULL,
+                        expected_runtime_sha TEXT NOT NULL,
+                        snapshot_digest TEXT NOT NULL,
+                        plan_digest TEXT NOT NULL,
+                        target_version TEXT NOT NULL,
+                        dispatch_state TEXT NOT NULL,
+                        github_run_id INTEGER UNIQUE,
+                        github_run_attempt INTEGER,
+                        dispatch_requested_at INTEGER,
+                        last_reconciled_at INTEGER,
+                        retry_count INTEGER NOT NULL DEFAULT 0,
+                        failure_code TEXT,
+                        version INTEGER NOT NULL DEFAULT 0,
+                        UNIQUE(device_id, request_id)
+                    );
+                    CREATE TABLE IF NOT EXISTS verified_artifacts (
+                        internal_task_id TEXT PRIMARY KEY REFERENCES build_tasks(internal_task_id),
+                        metadata_json TEXT NOT NULL,
+                        verified_at INTEGER NOT NULL
+                    );
+                    INSERT INTO gateway_meta(key, value) VALUES('schema_version', '3')
                         ON CONFLICT(key) DO NOTHING;
                     COMMIT;
                     """
@@ -144,6 +204,45 @@ class GatewayStore:
                 version = connection.execute(
                     "SELECT value FROM gateway_meta WHERE key='schema_version'"
                 ).fetchone()
+                if version is not None and int(version["value"]) == 1:
+                    connection.execute(
+                        "UPDATE gateway_meta SET value='2' WHERE key='schema_version' AND value='1'"
+                    )
+                    version = connection.execute(
+                        "SELECT value FROM gateway_meta WHERE key='schema_version'"
+                    ).fetchone()
+                if version is not None and int(version["value"]) == 2:
+                    columns = {
+                        row["name"] for row in connection.execute(
+                            "PRAGMA table_info(dispatch_intents)"
+                        ).fetchall()
+                    }
+                    if "external_task_id" not in columns:
+                        connection.execute(
+                            "ALTER TABLE dispatch_intents ADD COLUMN external_task_id TEXT"
+                        )
+                    connection.execute(
+                        """UPDATE dispatch_intents
+                           SET external_task_id='gw-' || replace(internal_task_id, '-', '')
+                           WHERE external_task_id IS NULL"""
+                    )
+                    connection.execute(
+                        """CREATE UNIQUE INDEX IF NOT EXISTS
+                           dispatch_intents_external_task_idx
+                           ON dispatch_intents(external_task_id)"""
+                    )
+                    connection.execute(
+                        """CREATE UNIQUE INDEX IF NOT EXISTS
+                           dispatch_intents_github_run_idx
+                           ON dispatch_intents(github_run_id)
+                           WHERE github_run_id IS NOT NULL"""
+                    )
+                    connection.execute(
+                        "UPDATE gateway_meta SET value='3' WHERE key='schema_version' AND value='2'"
+                    )
+                    version = connection.execute(
+                        "SELECT value FROM gateway_meta WHERE key='schema_version'"
+                    ).fetchone()
                 if version is None or int(version["value"]) != SCHEMA_VERSION:
                     raise sqlite3.DatabaseError("unsupported schema version")
                 integrity = connection.execute("PRAGMA quick_check").fetchone()
@@ -158,6 +257,14 @@ class GatewayStore:
         return hashlib.scrypt(
             secret.encode("utf-8"), salt=salt, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, dklen=32
         )
+
+    @staticmethod
+    def external_task_id(internal_task_id: str) -> str:
+        try:
+            value = uuid.UUID(internal_task_id)
+        except ValueError as exc:
+            raise GatewayError(ErrorCode.INTERNAL_ERROR, 500) from exc
+        return f"gw-{value.hex}"
 
     def issue_credential(self, device_id: str, *, ttl_seconds: int, now: int | None = None) -> str:
         if not device_id or len(device_id) > 128 or ttl_seconds <= 0:
@@ -369,6 +476,25 @@ class GatewayStore:
             raise GatewayError(ErrorCode.REQUEST_EXPIRED, 410)
         return task
 
+    def get_task_for_recovery(self, internal_task_id: str) -> TaskRecord:
+        """Read durable task state for startup audit without reviving expiry.
+
+        This internal-only path deliberately does not make an expired task
+        client-accessible. Recovery uses it to isolate the record and retain
+        its dispatch/run identities without performing another dispatch.
+        """
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT * FROM build_tasks WHERE internal_task_id=?",
+                    (internal_task_id,),
+                ).fetchone()
+            if row is None:
+                raise sqlite3.DatabaseError("recovery task missing")
+            return TaskRecord.from_row(row)
+        except (sqlite3.Error, ValueError, TypeError) as exc:
+            raise self._storage_error(exc) from exc
+
     def transition_task(
         self,
         internal_task_id: str,
@@ -376,6 +502,7 @@ class GatewayStore:
         *,
         failure_code: ErrorCode | None = None,
         failure_detail: str | None = None,
+        allow_t14b: bool = False,
         now: int | None = None,
     ) -> TaskRecord:
         timestamp = int(time.time() if now is None else now)
@@ -389,7 +516,8 @@ class GatewayStore:
                     connection.rollback()
                     raise GatewayError(ErrorCode.INTERNAL_ERROR, 500, internal_detail="task missing")
                 task = TaskRecord.from_row(row)
-                if not ensure_t14a_transition(task.status, target):
+                transition_check = ensure_t14b_transition if allow_t14b else ensure_t14a_transition
+                if not transition_check(task.status, target):
                     connection.commit()
                     return task
                 changed = connection.execute(
@@ -420,6 +548,326 @@ class GatewayStore:
                 return TaskRecord.from_row(row)
         except GatewayError:
             raise
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    @staticmethod
+    def _transition_in_transaction(
+        connection: sqlite3.Connection, task: TaskRecord, target: TaskStatus,
+        timestamp: int, *, failure_code: ErrorCode | None = None,
+    ) -> None:
+        if not ensure_t14b_transition(task.status, target):
+            return
+        changed = connection.execute(
+            """UPDATE build_tasks SET status=?, updated_at=?, failure_code=?, version=version+1
+               WHERE internal_task_id=? AND version=?""",
+            (target.value, timestamp, failure_code.value if failure_code else None,
+             task.internal_task_id, task.version),
+        ).rowcount
+        if changed != 1:
+            raise sqlite3.DatabaseError("task transition compare-and-swap failed")
+        connection.execute(
+            """INSERT INTO task_transitions
+               (internal_task_id, from_status, to_status, changed_at, failure_code)
+               VALUES (?, ?, ?, ?, ?)""",
+            (task.internal_task_id, task.status.value, target.value, timestamp,
+             failure_code.value if failure_code else None),
+        )
+
+    def create_dispatch_intent(
+        self, task: TaskRecord, *, trusted_code_commit_sha: str,
+        workflow_id: str, dispatch_ref: str, snapshot_digest: str,
+        plan_digest: str, target_version: str, now: int | None = None,
+    ) -> tuple[DispatchIntent, bool]:
+        external_task_id = self.external_task_id(task.internal_task_id)
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                # Production time is sampled only after the SQLite write lock
+                # is held. An explicit `now` is a fixed deterministic test time.
+                timestamp = int(time.time() if now is None else now)
+                current_row = connection.execute(
+                    "SELECT * FROM build_tasks WHERE internal_task_id=?", (task.internal_task_id,)
+                ).fetchone()
+                if current_row is None:
+                    connection.rollback()
+                    raise GatewayError(ErrorCode.INTERNAL_ERROR, 500)
+                current = TaskRecord.from_row(current_row)
+                if timestamp >= current.expires_at:
+                    connection.rollback()
+                    raise GatewayError(ErrorCode.REQUEST_EXPIRED, 410)
+                row = connection.execute(
+                    "SELECT * FROM dispatch_intents WHERE internal_task_id=?",
+                    (task.internal_task_id,),
+                ).fetchone()
+                if row is not None:
+                    intent = DispatchIntent.from_row(row)
+                    expected = (external_task_id, task.build_input_digest, task.evidence_commit_sha,
+                                trusted_code_commit_sha, workflow_id, dispatch_ref,
+                                snapshot_digest, plan_digest, target_version)
+                    actual = (intent.external_task_id, intent.build_input_digest,
+                              intent.evidence_commit_sha,
+                              intent.trusted_code_commit_sha, intent.trusted_workflow_id,
+                              intent.dispatch_ref, intent.snapshot_digest, intent.plan_digest,
+                              intent.target_version)
+                    if actual != expected:
+                        connection.rollback()
+                        raise GatewayError(ErrorCode.IDEMPOTENCY_CONFLICT, 409)
+                    connection.commit()
+                    return intent, False
+                if current.status != TaskStatus.VALIDATED:
+                    connection.rollback()
+                    raise GatewayError(ErrorCode.BUILD_BLOCKED, 409)
+                intent_id = str(uuid.uuid4())
+                connection.execute(
+                    """INSERT INTO dispatch_intents
+                       (dispatch_intent_id, internal_task_id, device_id, request_id,
+                        external_task_id, build_input_digest, evidence_commit_sha,
+                        trusted_code_commit_sha,
+                        trusted_workflow_id, dispatch_ref, expected_runtime_sha,
+                        snapshot_digest, plan_digest, target_version, dispatch_state)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')""",
+                    (intent_id, current.internal_task_id, current.device_id, current.request_id,
+                     external_task_id, current.build_input_digest, current.evidence_commit_sha,
+                     trusted_code_commit_sha, workflow_id, dispatch_ref,
+                     current.evidence_commit_sha, snapshot_digest, plan_digest,
+                     target_version),
+                )
+                self._transition_in_transaction(
+                    connection, current, TaskStatus.DISPATCH_PENDING, timestamp
+                )
+                row = connection.execute(
+                    "SELECT * FROM dispatch_intents WHERE dispatch_intent_id=?", (intent_id,)
+                ).fetchone()
+                connection.commit()
+                return DispatchIntent.from_row(row), True
+        except GatewayError:
+            raise
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def get_dispatch_intent(self, internal_task_id: str) -> DispatchIntent | None:
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT * FROM dispatch_intents WHERE internal_task_id=?", (internal_task_id,)
+                ).fetchone()
+                return DispatchIntent.from_row(row) if row else None
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def list_recoverable_intents(self) -> list[DispatchIntent]:
+        """Return external-work states without changing or retrying them."""
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """SELECT dispatch_intents.* FROM dispatch_intents
+                       JOIN build_tasks USING (internal_task_id)
+                       WHERE build_tasks.status IN
+                           ('DISPATCH_PENDING', 'DISPATCHING', 'DISPATCH_UNKNOWN',
+                            'QUEUED', 'RUNNING', 'VERIFYING_ARTIFACT')
+                       ORDER BY dispatch_requested_at, dispatch_intent_id"""
+                ).fetchall()
+                return [DispatchIntent.from_row(row) for row in rows]
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def claim_dispatch(self, intent_id: str, *, now: int | None = None) -> DispatchIntent | None:
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                timestamp = int(time.time() if now is None else now)
+                row = connection.execute(
+                    "SELECT * FROM dispatch_intents WHERE dispatch_intent_id=?", (intent_id,)
+                ).fetchone()
+                if row is None or row["dispatch_state"] != "PENDING":
+                    connection.commit()
+                    return None
+                task = TaskRecord.from_row(connection.execute(
+                    "SELECT * FROM build_tasks WHERE internal_task_id=?", (row["internal_task_id"],)
+                ).fetchone())
+                if timestamp >= task.expires_at:
+                    connection.rollback()
+                    raise GatewayError(ErrorCode.REQUEST_EXPIRED, 410)
+                connection.execute(
+                    """UPDATE dispatch_intents SET dispatch_state='DISPATCHING',
+                       dispatch_requested_at=?, version=version+1
+                       WHERE dispatch_intent_id=? AND dispatch_state='PENDING'""",
+                    (timestamp, intent_id),
+                )
+                self._transition_in_transaction(connection, task, TaskStatus.DISPATCHING, timestamp)
+                result = connection.execute(
+                    "SELECT * FROM dispatch_intents WHERE dispatch_intent_id=?", (intent_id,)
+                ).fetchone()
+                connection.commit()
+                return DispatchIntent.from_row(result)
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def authorize_dispatch_attempt(
+        self, intent_id: str, *, now: int | None = None,
+    ) -> DispatchIntent:
+        """Atomically fail expiry immediately before the external side effect."""
+        expired = False
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                timestamp = int(time.time() if now is None else now)
+                row = connection.execute(
+                    "SELECT * FROM dispatch_intents WHERE dispatch_intent_id=?", (intent_id,)
+                ).fetchone()
+                if row is None or row["dispatch_state"] != "DISPATCHING":
+                    connection.rollback()
+                    raise GatewayError(ErrorCode.DISPATCH_UNKNOWN, 409)
+                task = TaskRecord.from_row(connection.execute(
+                    "SELECT * FROM build_tasks WHERE internal_task_id=?",
+                    (row["internal_task_id"],),
+                ).fetchone())
+                if timestamp >= task.expires_at:
+                    connection.execute(
+                        """UPDATE dispatch_intents
+                           SET dispatch_state='FAILED', failure_code=?, version=version+1
+                           WHERE dispatch_intent_id=? AND dispatch_state='DISPATCHING'""",
+                        (ErrorCode.REQUEST_EXPIRED.value, intent_id),
+                    )
+                    self._transition_in_transaction(
+                        connection, task, TaskStatus.FAILED, timestamp,
+                        failure_code=ErrorCode.REQUEST_EXPIRED,
+                    )
+                    expired = True
+                result = connection.execute(
+                    "SELECT * FROM dispatch_intents WHERE dispatch_intent_id=?", (intent_id,)
+                ).fetchone()
+                connection.commit()
+            if expired:
+                raise GatewayError(ErrorCode.REQUEST_EXPIRED, 410)
+            return DispatchIntent.from_row(result)
+        except GatewayError:
+            raise
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def mark_dispatch_unknown(
+        self, intent_id: str, *, failure_code: ErrorCode = ErrorCode.DISPATCH_UNKNOWN,
+        now: int | None = None,
+    ) -> DispatchIntent:
+        timestamp = int(time.time() if now is None else now)
+        return self._update_intent_and_task(
+            intent_id, "UNKNOWN", TaskStatus.DISPATCH_UNKNOWN, timestamp,
+            failure_code=failure_code,
+        )
+
+    def bind_dispatch_run(
+        self, intent_id: str, run_id: int, run_attempt: int, *, now: int | None = None,
+    ) -> DispatchIntent:
+        if run_id <= 0 or run_attempt <= 0:
+            raise GatewayError(ErrorCode.RUN_IDENTITY_MISMATCH, 409)
+        timestamp = int(time.time() if now is None else now)
+        return self._update_intent_and_task(
+            intent_id, "BOUND", TaskStatus.QUEUED, timestamp,
+            run_id=run_id, run_attempt=run_attempt,
+        )
+
+    def record_reconciliation(
+        self, intent_id: str, *, increment_retry: bool = False,
+        now: int | None = None,
+    ) -> None:
+        timestamp = int(time.time() if now is None else now)
+        try:
+            with self._connect() as connection:
+                changed = connection.execute(
+                    """UPDATE dispatch_intents
+                       SET last_reconciled_at=?,
+                           retry_count=retry_count+?,
+                           version=version+1
+                       WHERE dispatch_intent_id=?""",
+                    (timestamp, 1 if increment_retry else 0, intent_id),
+                ).rowcount
+                if changed != 1:
+                    raise sqlite3.DatabaseError("dispatch intent missing")
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def _update_intent_and_task(
+        self, intent_id: str, intent_state: str, task_state: TaskStatus, timestamp: int,
+        *, failure_code: ErrorCode | None = None, run_id: int | None = None,
+        run_attempt: int | None = None,
+    ) -> DispatchIntent:
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT * FROM dispatch_intents WHERE dispatch_intent_id=?", (intent_id,)
+                ).fetchone()
+                if row is None:
+                    connection.rollback()
+                    raise GatewayError(ErrorCode.INTERNAL_ERROR, 500)
+                task = TaskRecord.from_row(connection.execute(
+                    "SELECT * FROM build_tasks WHERE internal_task_id=?", (row["internal_task_id"],)
+                ).fetchone())
+                connection.execute(
+                    """UPDATE dispatch_intents SET dispatch_state=?, github_run_id=?,
+                       github_run_attempt=?, last_reconciled_at=?, failure_code=?, version=version+1
+                       WHERE dispatch_intent_id=?""",
+                    (intent_state, run_id, run_attempt, timestamp,
+                     failure_code.value if failure_code else None, intent_id),
+                )
+                self._transition_in_transaction(
+                    connection, task, task_state, timestamp, failure_code=failure_code
+                )
+                if run_id is not None:
+                    connection.execute(
+                        """UPDATE build_tasks SET github_run_id=?, github_run_attempt=?
+                           WHERE internal_task_id=?""",
+                        (run_id, run_attempt, task.internal_task_id),
+                    )
+                result = connection.execute(
+                    "SELECT * FROM dispatch_intents WHERE dispatch_intent_id=?", (intent_id,)
+                ).fetchone()
+                connection.commit()
+                return DispatchIntent.from_row(result)
+        except GatewayError:
+            raise
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def store_verified_artifact(
+        self, task: TaskRecord, metadata_json: str, *, now: int | None = None,
+    ) -> TaskRecord:
+        timestamp = int(time.time() if now is None else now)
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current = TaskRecord.from_row(connection.execute(
+                    "SELECT * FROM build_tasks WHERE internal_task_id=?", (task.internal_task_id,)
+                ).fetchone())
+                if current.status != TaskStatus.VERIFYING_ARTIFACT:
+                    connection.rollback()
+                    raise GatewayError(ErrorCode.ARTIFACT_UNVERIFIED, 409)
+                connection.execute(
+                    """INSERT INTO verified_artifacts(internal_task_id, metadata_json, verified_at)
+                       VALUES (?, ?, ?) ON CONFLICT(internal_task_id) DO NOTHING""",
+                    (current.internal_task_id, metadata_json, timestamp),
+                )
+                self._transition_in_transaction(connection, current, TaskStatus.SUCCEEDED, timestamp)
+                row = connection.execute(
+                    "SELECT * FROM build_tasks WHERE internal_task_id=?", (current.internal_task_id,)
+                ).fetchone()
+                connection.commit()
+                return TaskRecord.from_row(row)
+        except GatewayError:
+            raise
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def get_verified_artifact(self, internal_task_id: str) -> str | None:
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT metadata_json FROM verified_artifacts WHERE internal_task_id=?",
+                    (internal_task_id,),
+                ).fetchone()
+                return str(row["metadata_json"]) if row else None
         except sqlite3.Error as exc:
             raise self._storage_error(exc) from exc
 

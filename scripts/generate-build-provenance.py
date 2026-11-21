@@ -19,6 +19,9 @@ def main() -> int:
     parser.add_argument("--repo-root", type=Path, default=Path("."))
     parser.add_argument("--repository", required=True)
     parser.add_argument("--commit", required=True)
+    parser.add_argument("--evidence-commit")
+    parser.add_argument("--runtime-commit")
+    parser.add_argument("--gateway-task-id")
     parser.add_argument("--run-id", type=int, required=True)
     parser.add_argument("--run-attempt", type=int, required=True)
     parser.add_argument("--firmware", type=Path, required=True)
@@ -39,7 +42,8 @@ def main() -> int:
             for provider in build_input["thirdparty"] for asset in provider["assets"]
         ]
         value = {
-            "schema_version": "1.0.0", "provenance_id": "", "digest": "",
+            "schema_version": "2.0.0", "provenance_id": "", "digest": "",
+            "gateway_task_id": args.gateway_task_id or f"gw-{context['build_input_digest'][:32]}",
             "request_id": context["request_id"],
             "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "build_input_id": context["build_input_id"],
@@ -51,6 +55,9 @@ def main() -> int:
             "official_index_digest": context["release"]["official_index_digest"],
             "provider_assets": assets,
             "trace": {"repository": args.repository, "commit_sha": context["runtime_commit_sha"],
+                      "trusted_code_commit_sha": context["runtime_commit_sha"],
+                      "evidence_commit_sha": args.evidence_commit or args.commit,
+                      "workflow_runtime_sha": args.runtime_commit or args.evidence_commit or args.commit,
                       "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt},
             "imagebuilder": {"url": context["release"]["imagebuilder_url"],
                              "filename": context["release"]["imagebuilder_filename"],
@@ -64,7 +71,7 @@ def main() -> int:
         digest = canonical_digest(value, ("provenance_id", "digest"))
         value["digest"] = digest
         value["provenance_id"] = f"urn:sha256:{digest}"
-        validate_schema(value, args.repo_root / "schemas/build-provenance-v1.json", "build provenance")
+        validate_schema(value, args.repo_root / "schemas/build-provenance-v2.json", "build provenance")
         write_json(args.output, value)
     except (EvidenceError, OSError) as exc:
         print(f"::error::PROVENANCE BLOCKED: {exc}")
