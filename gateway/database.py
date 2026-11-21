@@ -579,11 +579,13 @@ class GatewayStore:
         workflow_id: str, dispatch_ref: str, snapshot_digest: str,
         plan_digest: str, target_version: str, now: int | None = None,
     ) -> tuple[DispatchIntent, bool]:
-        timestamp = int(time.time() if now is None else now)
         external_task_id = self.external_task_id(task.internal_task_id)
         try:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                # Production time is sampled only after the SQLite write lock
+                # is held. An explicit `now` is a fixed deterministic test time.
+                timestamp = int(time.time() if now is None else now)
                 current_row = connection.execute(
                     "SELECT * FROM build_tasks WHERE internal_task_id=?", (task.internal_task_id,)
                 ).fetchone()
@@ -671,10 +673,10 @@ class GatewayStore:
             raise self._storage_error(exc) from exc
 
     def claim_dispatch(self, intent_id: str, *, now: int | None = None) -> DispatchIntent | None:
-        timestamp = int(time.time() if now is None else now)
         try:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                timestamp = int(time.time() if now is None else now)
                 row = connection.execute(
                     "SELECT * FROM dispatch_intents WHERE dispatch_intent_id=?", (intent_id,)
                 ).fetchone()
@@ -706,11 +708,11 @@ class GatewayStore:
         self, intent_id: str, *, now: int | None = None,
     ) -> DispatchIntent:
         """Atomically fail expiry immediately before the external side effect."""
-        timestamp = int(time.time() if now is None else now)
         expired = False
         try:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                timestamp = int(time.time() if now is None else now)
                 row = connection.execute(
                     "SELECT * FROM dispatch_intents WHERE dispatch_intent_id=?", (intent_id,)
                 ).fetchone()

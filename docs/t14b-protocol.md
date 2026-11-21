@@ -70,8 +70,13 @@ atomically; another worker cannot dispatch it.
 
 Task expiry is part of the same `BEGIN IMMEDIATE` transaction that creates an
 intent or changes `PENDING` to `DISPATCHING`; `now >= expires_at` fails closed.
+Production time is sampled only after `BEGIN IMMEDIATE` successfully acquires
+the SQLite writer lock, so lock wait cannot reuse a pre-wait timestamp. The
+optional `now` argument is a fixed deterministic test time and is never supplied
+by production service calls.
 After token acquisition and Ref resolution, the Gateway performs one final
-transactional deadline authorization immediately before calling GitHub. No
+transactional deadline authorization immediately before calling GitHub. Its
+production clock is likewise sampled after acquiring the writer lock. No
 queue wait, token operation, network read, or other blocking operation occurs
 between that authorization and the Dispatch invocation. A task proven expired
 at this point is atomically recorded as task `FAILED` and intent `FAILED` with

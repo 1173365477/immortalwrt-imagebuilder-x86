@@ -15,16 +15,16 @@ or claim flash safety. `flash_ready=false` remains invariant.
 | B01 commit/ref protocol and threat model | PASS | Four distinct identities, ancestry and protected-tree checks are documented and exercised by a two-commit fixture. |
 | B02 GitHub App least privilege | PASS (adapter) | Fixed installation/repository, exact Metadata Read / Contents Read / Actions Write permission set, expiry refresh, memory-only token and canary scans. Production issuer is intentionally not configured. |
 | B03 immutable evidence resolver | PASS (controlled fetcher) | Full commit checkout, fixed repository, bounded files/bytes, unsafe type rejection, duplicate-safe JSON, T13 output identity binding. |
-| B04 durable dispatch intent | PASS | SQLite unique intent, server-generated globally unique `gateway_task_id`, transaction-before-side-effect, expiry checks inside both intent creation and atomic claim transactions, globally unique GitHub Run binding, persistent identity, transition audit, concurrent replay tests. |
+| B04 durable dispatch intent | PASS | SQLite unique intent, server-generated globally unique `gateway_task_id`, transaction-before-side-effect, expiry checks inside both intent creation and atomic claim transactions, and production time sampled only after `BEGIN IMMEDIATE` has acquired the write lock. |
 | B05 workflow dispatch and run binding | PASS (Mock API) | The Gateway identity is bound through Ref, Workflow input, Run Name, concurrency group, artifact name and provenance. Exact repository/workflow/event/ref/SHA/Gateway identity/digest/attempt checks prevent cross-device Run reuse for both explicit and legacy dispatch responses. No production dispatch occurred. |
 | B06 state and recovery | PASS | Fail-closed transition table; startup distinguishes never-claimed `PENDING` from ambiguous `DISPATCHING`; unknown dispatch is reconciled without redispatch. Recovery isolates each record and rechecks expiry atomically at Claim. A final transactional deadline authorization occurs after Ref resolution and immediately before Dispatch; proven pre-call expiry becomes audited `FAILED/REQUEST_EXPIRED`, while an attempted or ambiguous external call remains `DISPATCH_UNKNOWN`. |
 | B07 run polling | PASS | Queued/running/terminal mapping, attempt pinning, no state regression, bounded read retry/backoff, persisted reconciliation time and request quotas. |
 | B08 artifact/provenance | PASS (synthetic ZIP) | Bounded streamed download and firmware hashing, reference-counted per-task lock entries and bounded verification concurrency; expiry/envelope, ZIP traversal/type/duplicate/size/ratio, v2 schema/digest, Gateway/run/request/Snapshot/Plan identity, firmware SHA256/size and `flash_ready=false` checks. |
 | B09 API | PASS | Idempotent POST and device-scoped task/artifact/log GET routes. `/targets` and `/analysis` remain documented as not implemented. |
 | B10 log safety | PASS | Attempt-specific GitHub log ZIP handling; archive/member/expanded/output bounds; path, type, duplicate, binary and UTF-8 checks; control removal plus secret-field and standalone GitHub-token redaction. Raw archives are not returned. |
-| B11 regression | PASS | 311 tests collected after P3 remediation. Linux CI: 310 passed and 1 skipped; the separate pinned real apk-tools integration passed. actionlint, ShellCheck, YAML/Python/Schema checks, online index validation and strict negative gates passed. |
+| B11 regression | PENDING CI | 316 tests collected after P4 remediation. Local non-platform-specific regression: 275 passed and 1 skipped. Final Linux pytest, real apk-tools, actionlint, ShellCheck, YAML/Python/Schema, online index and strict negative results are recorded after push. |
 
-P3 remediation CI evidence: <https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/44658489015>.
+Previous P3 CI evidence: <https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/44658689049>.
 
 ## Security proofs covered by tests
 
@@ -63,6 +63,12 @@ P3 remediation CI evidence: <https://github.com/1173365477/immortalwrt-imagebuil
     claimed task expires during Ref resolution, the database atomically records
     `FAILED/REQUEST_EXPIRED` before any external call. Once a Dispatch has been
     attempted, ambiguity remains `DISPATCH_UNKNOWN` and cannot be redispatched.
+16. Real SQLite writer-lock tests hold an independent `BEGIN IMMEDIATE`
+    transaction while intent creation, Claim, and final authorization begin.
+    The clock crosses `expires_at` before lock acquisition completes; each
+    production path samples time after acquiring the lock and fails closed.
+    Eight-worker and Mock Dispatch coverage confirms no expired authorization,
+    duplicate Dispatch, partial transition, or loss of audit identity.
 
 ## Workflow and provenance compatibility
 

@@ -18,6 +18,7 @@ import pytest
 import httpx2 as httpx
 from fastapi.testclient import TestClient
 
+import gateway.database as gateway_database
 from gateway.app import GatewaySettings, create_app
 from gateway.database import GatewayStore
 from gateway.errors import ErrorCode, GatewayError
@@ -219,6 +220,42 @@ def log_zip(content: bytes, *, name: str = "jobs/build.txt") -> bytes:
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(name, content)
     return output.getvalue()
+
+
+class LockWaitClock:
+    def __init__(self, value: int):
+        self.value = value
+        self.calls: list[int] = []
+
+    def time(self):
+        self.calls.append(self.value)
+        return self.value
+
+
+def run_after_sqlite_write_lock_wait(store, monkeypatch, clock, operation):
+    """Start an operation behind a real SQLite writer and advance its clock."""
+    holder = store._connect()
+    holder.execute("BEGIN IMMEDIATE")
+    original_connect = store._connect
+    begin_attempted = threading.Event()
+
+    def traced_connect():
+        connection = original_connect()
+        connection.set_trace_callback(
+            lambda statement: begin_attempted.set()
+            if statement.upper().startswith("BEGIN IMMEDIATE") else None
+        )
+        return connection
+
+    monkeypatch.setattr(store, "_connect", traced_connect)
+    monkeypatch.setattr(gateway_database.time, "time", clock.time)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(operation)
+    assert begin_attempted.wait(2)
+    clock.value += 1
+    holder.commit()
+    holder.close()
+    return pool, future
 
 
 def test_installation_token_is_cached_refreshed_and_permission_bound():
@@ -842,6 +879,170 @@ def test_concurrent_workers_cannot_claim_at_expiry_boundary(tmp_path):
     assert all(item is None for item in claims)
     assert store.get_dispatch_intent(task.internal_task_id).dispatch_state == "PENDING"
     assert store.get_task_for_recovery(task.internal_task_id).status == TaskStatus.DISPATCH_PENDING
+    assert api.dispatch_calls == 0
+
+
+def test_intent_creation_rechecks_expiry_after_sqlite_lock_wait(tmp_path, monkeypatch):
+    store, _, api, _ = service(tmp_path)
+    task = validated_task(store)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE build_tasks SET expires_at=101 WHERE internal_task_id=?",
+            (task.internal_task_id,),
+        )
+    clock = LockWaitClock(100)
+    pool, future = run_after_sqlite_write_lock_wait(
+        store, monkeypatch, clock,
+        lambda: store.create_dispatch_intent(
+            task, trusted_code_commit_sha=CODE, workflow_id=WORKFLOW,
+            dispatch_ref=f"evidence/{store.external_task_id(task.internal_task_id)}",
+            snapshot_digest="1" * 64, plan_digest="2" * 64,
+            target_version="25.12.2",
+        ),
+    )
+    try:
+        with pytest.raises(GatewayError) as raised:
+            future.result(timeout=2)
+        assert raised.value.code == ErrorCode.REQUEST_EXPIRED
+    finally:
+        pool.shutdown()
+    assert clock.calls == [101]
+    assert store.get_dispatch_intent(task.internal_task_id) is None
+    assert api.dispatch_calls == 0
+
+
+def test_claim_rechecks_expiry_after_sqlite_lock_wait(tmp_path, monkeypatch):
+    store, _, api, _ = service(tmp_path)
+    task = validated_task(store)
+    intent, _ = store.create_dispatch_intent(
+        task, trusted_code_commit_sha=CODE, workflow_id=WORKFLOW,
+        dispatch_ref=f"evidence/{store.external_task_id(task.internal_task_id)}",
+        snapshot_digest="1" * 64, plan_digest="2" * 64, target_version="25.12.2",
+    )
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE build_tasks SET expires_at=101 WHERE internal_task_id=?",
+            (task.internal_task_id,),
+        )
+    clock = LockWaitClock(100)
+    pool, future = run_after_sqlite_write_lock_wait(
+        store, monkeypatch, clock,
+        lambda: store.claim_dispatch(intent.dispatch_intent_id),
+    )
+    try:
+        with pytest.raises(GatewayError) as raised:
+            future.result(timeout=2)
+        assert raised.value.code == ErrorCode.REQUEST_EXPIRED
+    finally:
+        pool.shutdown()
+    assert clock.calls == [101]
+    assert store.get_dispatch_intent(task.internal_task_id).dispatch_state == "PENDING"
+    assert store.get_task_for_recovery(task.internal_task_id).status == TaskStatus.DISPATCH_PENDING
+    assert api.dispatch_calls == 0
+
+
+def test_final_authorization_rechecks_expiry_after_sqlite_lock_wait(
+    tmp_path, monkeypatch
+):
+    store, _, api, _ = service(tmp_path)
+    task = validated_task(store)
+    intent, _ = store.create_dispatch_intent(
+        task, trusted_code_commit_sha=CODE, workflow_id=WORKFLOW,
+        dispatch_ref=f"evidence/{store.external_task_id(task.internal_task_id)}",
+        snapshot_digest="1" * 64, plan_digest="2" * 64, target_version="25.12.2",
+    )
+    store.claim_dispatch(intent.dispatch_intent_id, now=99)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE build_tasks SET expires_at=101 WHERE internal_task_id=?",
+            (task.internal_task_id,),
+        )
+    clock = LockWaitClock(100)
+    pool, future = run_after_sqlite_write_lock_wait(
+        store, monkeypatch, clock,
+        lambda: store.authorize_dispatch_attempt(intent.dispatch_intent_id),
+    )
+    try:
+        with pytest.raises(GatewayError) as raised:
+            future.result(timeout=2)
+        assert raised.value.code == ErrorCode.REQUEST_EXPIRED
+    finally:
+        pool.shutdown()
+    assert clock.calls == [101]
+    persisted = store.get_dispatch_intent(task.internal_task_id)
+    assert persisted.dispatch_state == "FAILED"
+    assert persisted.failure_code == ErrorCode.REQUEST_EXPIRED.value
+    assert store.get_task_for_recovery(task.internal_task_id).status == TaskStatus.FAILED
+    assert api.dispatch_calls == 0
+
+
+def test_sqlite_lock_wait_expiry_prevents_mock_dispatch(tmp_path, monkeypatch):
+    store, _, api, worker = service(tmp_path)
+    task = validated_task(store)
+    intent, _ = store.create_dispatch_intent(
+        task, trusted_code_commit_sha=CODE, workflow_id=WORKFLOW,
+        dispatch_ref=f"evidence/{store.external_task_id(task.internal_task_id)}",
+        snapshot_digest="1" * 64, plan_digest="2" * 64, target_version="25.12.2",
+    )
+    claimed = store.claim_dispatch(intent.dispatch_intent_id, now=99)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE build_tasks SET expires_at=101 WHERE internal_task_id=?",
+            (task.internal_task_id,),
+        )
+    clock = LockWaitClock(100)
+    pool, future = run_after_sqlite_write_lock_wait(
+        store, monkeypatch, clock, lambda: worker._dispatch_claimed(task, claimed)
+    )
+    try:
+        result = future.result(timeout=2)
+    finally:
+        pool.shutdown()
+    assert clock.calls[-1] == 101
+    assert api.dispatch_calls == 0
+    assert result.status == TaskStatus.FAILED
+    assert store.get_dispatch_intent(task.internal_task_id).dispatch_state == "FAILED"
+
+
+def test_sqlite_expiry_boundary_preserves_audit_and_terminal_state(
+    tmp_path, monkeypatch
+):
+    store, _, api, _ = service(tmp_path)
+    task = validated_task(store)
+    intent, _ = store.create_dispatch_intent(
+        task, trusted_code_commit_sha=CODE, workflow_id=WORKFLOW,
+        dispatch_ref=f"evidence/{store.external_task_id(task.internal_task_id)}",
+        snapshot_digest="1" * 64, plan_digest="2" * 64, target_version="25.12.2",
+    )
+    store.claim_dispatch(intent.dispatch_intent_id, now=99)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE build_tasks SET expires_at=101 WHERE internal_task_id=?",
+            (task.internal_task_id,),
+        )
+    clock = LockWaitClock(100)
+    pool, future = run_after_sqlite_write_lock_wait(
+        store, monkeypatch, clock,
+        lambda: store.authorize_dispatch_attempt(intent.dispatch_intent_id),
+    )
+    try:
+        with pytest.raises(GatewayError):
+            future.result(timeout=2)
+    finally:
+        pool.shutdown()
+    persisted = store.get_dispatch_intent(task.internal_task_id)
+    with store._connect() as connection:
+        transitions = connection.execute(
+            "SELECT to_status, failure_code FROM task_transitions "
+            "WHERE internal_task_id=? ORDER BY transition_id",
+            (task.internal_task_id,),
+        ).fetchall()
+    assert persisted.external_task_id == intent.external_task_id
+    assert persisted.dispatch_ref == intent.dispatch_ref
+    assert persisted.dispatch_state == "FAILED"
+    assert (transitions[-1]["to_status"], transitions[-1]["failure_code"]) == (
+        TaskStatus.FAILED.value, ErrorCode.REQUEST_EXPIRED.value,
+    )
     assert api.dispatch_calls == 0
 
 
