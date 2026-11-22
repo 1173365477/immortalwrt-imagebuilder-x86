@@ -1,0 +1,284 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# rpcd exec provider for fixed, read-only Smart Upgrade operations.
+set -eu
+
+umask 077
+LC_ALL=C
+export LC_ALL
+
+STATE_DIR=${SMART_UPGRADE_STATE_DIR:-/tmp/smart-upgrade}
+AGENT=${SMART_UPGRADE_AGENT:-/usr/libexec/smart-upgrade/smart-upgrade-agent}
+JSONFILTER=${SMART_UPGRADE_JSONFILTER:-jsonfilter}
+JSHN_LIBRARY=${SMART_UPGRADE_JSHN_LIBRARY:-/usr/share/libubox/jshn.sh}
+SNAPSHOT=$STATE_DIR/system-snapshot-v1.json
+PLAN=$STATE_DIR/migration-plan-v1.json
+REPORT=$STATE_DIR/migration-report.md
+STATE=$STATE_DIR/scan-state.json
+LOCK=$STATE_DIR/scan.lock
+MAX_SNAPSHOT_BYTES=4194304
+MAX_PLAN_BYTES=8388608
+MAX_REPORT_BYTES=524288
+
+case "${1:-}" in
+list)
+	printf '%s\n' '{"status":{},"scan":{},"snapshot":{},"plan":{},"report":{}}'
+	exit 0
+	;;
+call) ;;
+*) exit 1 ;;
+esac
+
+[ -r "$JSHN_LIBRARY" ] || exit 1
+# shellcheck source=/dev/null
+. "$JSHN_LIBRARY"
+
+mkdir -p "$STATE_DIR"
+chmod 0700 "$STATE_DIR"
+
+timestamp() {
+	date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+file_size() {
+	wc -c < "$1" | tr -d ' '
+}
+
+json_value() {
+	"$JSONFILTER" -i "$1" -e "$2" 2>/dev/null || true
+}
+
+emit_error() {
+	json_init
+	json_add_boolean available 0
+	json_add_string error_code "$1"
+	json_add_string error_message "$2"
+	json_add_boolean dispatch_allowed 0
+	json_add_boolean flash_ready 0
+	json_dump
+}
+
+write_state() {
+	state_tmp=$(mktemp "$STATE_DIR/.scan-state.XXXXXX")
+	json_init
+	json_add_string scan_status "$1"
+	json_add_string started_at "$2"
+	json_add_string completed_at "$3"
+	json_add_string snapshot_id "$4"
+	json_add_string snapshot_status "$5"
+	json_add_string error_code "$6"
+	json_add_string error_message "$7"
+	json_add_boolean dispatch_allowed 0
+	json_add_boolean flash_ready 0
+	json_dump > "$state_tmp"
+	mv -f "$state_tmp" "$STATE"
+}
+
+emit_idle_status() {
+	json_init
+	json_add_string scan_status idle
+	json_add_string started_at ""
+	json_add_string completed_at ""
+	json_add_string snapshot_id ""
+	json_add_string snapshot_status unknown
+	json_add_string error_code ""
+	json_add_string error_message ""
+	json_add_boolean dispatch_allowed 0
+	json_add_boolean flash_ready 0
+	json_dump
+}
+
+emit_status() {
+	if [ -s "$STATE" ] && [ "$(file_size "$STATE")" -le 65536 ]; then
+		cat "$STATE"
+	else
+		emit_idle_status
+	fi
+}
+
+validate_snapshot() {
+	[ -s "$1" ] || return 1
+	[ "$(file_size "$1")" -le "$MAX_SNAPSHOT_BYTES" ] || return 1
+	[ "$(json_value "$1" '@.schema_version')" = 1.0.0 ] || return 1
+	[ "$(json_value "$1" '@.privacy_mode')" = redacted ] || return 1
+	snapshot_id=$(json_value "$1" '@.snapshot_id')
+	digest=$(json_value "$1" '@.digest.value')
+	case "$snapshot_id" in "urn:sha256:$digest") ;; *) return 1 ;; esac
+	printf '%s\n' "$digest" | grep -Eq '^[a-f0-9]{64}$' || return 1
+	snapshot_status=$(json_value "$1" '@.status')
+	case "$snapshot_status" in ok|partial|blocked|failed|unknown) ;; *) return 1 ;; esac
+	return 0
+}
+
+run_scan() {
+	if ! mkdir "$LOCK" 2>/dev/null; then
+		emit_error SCAN_BUSY "A read-only scan is already running"
+		return
+	fi
+
+	started=$(timestamp)
+	snapshot_tmp=$(mktemp "$STATE_DIR/.snapshot.XXXXXX")
+	err_tmp=$(mktemp "$STATE_DIR/.scan-error.XXXXXX")
+	cleanup_scan() {
+		rm -f "$snapshot_tmp" "$err_tmp"
+		rmdir "$LOCK" 2>/dev/null || true
+	}
+	trap cleanup_scan EXIT HUP INT TERM
+	write_state running "$started" "" "" unknown "" ""
+
+	if ! "$AGENT" --privacy redacted > "$snapshot_tmp" 2> "$err_tmp"; then
+		write_state failed "$started" "$(timestamp)" "" failed SCAN_FAILED \
+			"The fixed read-only scanner failed"
+		emit_status
+		return
+	fi
+	if ! validate_snapshot "$snapshot_tmp"; then
+		write_state failed "$started" "$(timestamp)" "" failed SNAPSHOT_INVALID \
+			"Scanner output failed the snapshot identity checks"
+		emit_status
+		return
+	fi
+
+	mv -f "$snapshot_tmp" "$SNAPSHOT"
+	case "$snapshot_status" in
+		ok) scan_status=completed ;;
+		failed) scan_status=failed ;;
+		*) scan_status=partial ;;
+	esac
+	write_state "$scan_status" "$started" "$(timestamp)" "$snapshot_id" \
+		"$snapshot_status" "" ""
+	emit_status
+}
+
+emit_snapshot() {
+	if ! validate_snapshot "$SNAPSHOT"; then
+		emit_error SNAPSHOT_MISSING "No valid read-only system snapshot is available"
+		return
+	fi
+	printf '%s' '{"available":true,"dispatch_allowed":false,"flash_ready":false,"snapshot":'
+	cat "$SNAPSHOT"
+	printf '%s\n' '}'
+}
+
+validate_plan() {
+	[ -s "$PLAN" ] || return 1
+	[ "$(file_size "$PLAN")" -le "$MAX_PLAN_BYTES" ] || return 1
+	plan_schema=$(json_value "$PLAN" '@.schema_version')
+	plan_id=$(json_value "$PLAN" '@.plan_id')
+	plan_digest=$(json_value "$PLAN" '@.digest')
+	plan_snapshot_id=$(json_value "$PLAN" '@.source_snapshot_id')
+	plan_snapshot_digest=$(json_value "$PLAN" '@.source_snapshot_digest')
+	plan_privacy=$(json_value "$PLAN" '@.privacy_mode')
+	flash_ready=$(json_value "$PLAN" '@.flash_ready')
+	[ "$plan_schema" = 1.0.0 ] || return 1
+	[ "$plan_privacy" = redacted ] || return 1
+	printf '%s\n' "$plan_digest" | grep -Eq '^[a-f0-9]{64}$' || return 1
+	printf '%s\n' "$plan_snapshot_digest" | grep -Eq '^[a-f0-9]{64}$' || return 1
+	[ "$plan_id" = "urn:sha256:$plan_digest" ] || return 1
+	[ "$plan_snapshot_id" = "urn:sha256:$plan_snapshot_digest" ] || return 1
+	[ "$flash_ready" = false ] || return 1
+	return 0
+}
+
+emit_plan() {
+	if ! validate_snapshot "$SNAPSHOT"; then
+		emit_error SNAPSHOT_MISSING "No valid read-only system snapshot is available"
+		return
+	fi
+	if ! validate_plan; then
+		emit_error REPORT_INVALID "Migration Plan identity or safety fields are invalid"
+		return
+	fi
+	if [ "$plan_snapshot_id" != "$snapshot_id" ] || \
+		[ "$plan_snapshot_digest" != "$digest" ]; then
+		emit_error REPORT_SNAPSHOT_MISMATCH \
+			"Migration Plan is not bound to the current Snapshot"
+		return
+	fi
+	printf '%s' '{"available":true,"dispatch_allowed":false,"flash_ready":false,"plan":'
+	cat "$PLAN"
+	printf '%s\n' '}'
+}
+
+bool_value() {
+	case "$1" in true|1) printf 1 ;; *) printf 0 ;; esac
+}
+
+add_plan_array() {
+	key=$1
+	expression=$2
+	array_tmp=$(mktemp "$STATE_DIR/.report-array.XXXXXX")
+	json_value "$PLAN" "$expression" > "$array_tmp"
+	json_add_array "$key"
+	while IFS= read -r item; do
+		[ -z "$item" ] || json_add_string "" "$item"
+	done < "$array_tmp"
+	json_close_array
+	rm -f "$array_tmp"
+}
+
+emit_report() {
+	if [ ! -s "$PLAN" ] || [ ! -s "$REPORT" ]; then
+		emit_error REPORT_MISSING "Migration Plan and report have not been generated"
+		return
+	fi
+	if [ "$(file_size "$PLAN")" -gt "$MAX_PLAN_BYTES" ] || \
+		[ "$(file_size "$REPORT")" -gt "$MAX_REPORT_BYTES" ]; then
+		emit_error REPORT_TOO_LARGE "Migration evidence exceeds the display limit"
+		return
+	fi
+
+	if ! validate_plan; then
+		emit_error REPORT_INVALID "Migration Plan identity or safety fields are invalid"
+		return
+	fi
+
+	current_snapshot_id=""
+	if validate_snapshot "$SNAPSHOT"; then
+		current_snapshot_id=$snapshot_id
+	fi
+	if [ -z "$current_snapshot_id" ]; then
+		integrity_status=unknown
+	elif [ "$current_snapshot_id" = "$plan_snapshot_id" ] && \
+		[ "$digest" = "$plan_snapshot_digest" ]; then
+		integrity_status=matched
+	else
+		integrity_status=mismatch
+	fi
+
+	report_content=$(cat "$REPORT")
+	json_init
+	json_add_boolean available 1
+	json_add_string integrity_status "$integrity_status"
+	json_add_string current_snapshot_id "$current_snapshot_id"
+	json_add_string snapshot_id "$plan_snapshot_id"
+	json_add_string plan_id "$plan_id"
+	json_add_string plan_status "$(json_value "$PLAN" '@.status')"
+	json_add_string target_distribution "$(json_value "$PLAN" '@.target.distribution')"
+	json_add_string target_version "$(json_value "$PLAN" '@.target.version')"
+	json_add_string target "$(json_value "$PLAN" '@.target.target')"
+	json_add_string profile "$(json_value "$PLAN" '@.target.profile')"
+	json_add_string architecture "$(json_value "$PLAN" '@.target.architecture')"
+	json_add_string package_manager "$(json_value "$PLAN" '@.target.package_manager')"
+	json_add_string compatibility "$(json_value "$PLAN" '@.target.compatibility')"
+	json_add_boolean build_allowed "$(bool_value "$(json_value "$PLAN" '@.build_allowed')")"
+	json_add_boolean dispatch_allowed 0
+	json_add_boolean flash_ready 0
+	add_plan_array blockers '@.blockers[*]'
+	add_plan_array warnings '@.warnings[*]'
+	add_plan_array errors '@.errors[*]'
+	json_add_string content "$report_content"
+	json_dump
+}
+
+# rpcd sends a JSON request object on stdin. No method accepts a path, command,
+# package name, service name, or other client-controlled execution argument.
+cat >/dev/null
+case "${2:-}" in
+	status) emit_status ;;
+	scan) run_scan ;;
+	snapshot) emit_snapshot ;;
+	plan) emit_plan ;;
+	report) emit_report ;;
+	*) emit_error METHOD_NOT_FOUND "Unknown Smart Upgrade method" ;;
+esac
