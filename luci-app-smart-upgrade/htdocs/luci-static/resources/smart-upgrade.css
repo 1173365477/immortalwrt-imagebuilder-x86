@@ -1,0 +1,18 @@
+.smart-upgrade-section { margin-top: 1.25rem; }
+.smart-upgrade-description, .smart-upgrade-muted { color: var(--text-color-medium, #666); }
+.smart-upgrade-kv .tr { grid-template-columns: minmax(10rem, 0.35fr) minmax(12rem, 1fr); }
+.smart-upgrade-kv .td:first-child { font-weight: 600; }
+.smart-upgrade-wide-table { overflow-x: auto; }
+.smart-upgrade-badge { display: inline-block; border-radius: .25rem; padding: .15rem .45rem; font-weight: 600; }
+.smart-upgrade-badge.is-ok { background: #d7f4df; color: #166534; }
+.smart-upgrade-badge.is-danger { background: #fee2e2; color: #991b1b; }
+.smart-upgrade-badge.is-unknown { background: #fef3c7; color: #854d0e; }
+.smart-upgrade-blocker-title, .smart-upgrade-blockers { color: #991b1b; }
+.smart-upgrade-report { max-height: 32rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.smart-upgrade-section small { display: block; margin-top: .25rem; color: var(--text-color-medium, #666); }
+
+@media (max-width: 700px) {
+	.smart-upgrade-kv .tr { grid-template-columns: 1fr; }
+	.smart-upgrade-kv .td:first-child { padding-bottom: 0; }
+	.smart-upgrade-wide-table .tr { min-width: 48rem; }
+}

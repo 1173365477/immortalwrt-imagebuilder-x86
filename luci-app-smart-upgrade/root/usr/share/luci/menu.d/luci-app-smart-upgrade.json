@@ -1,0 +1,13 @@
+{
+	"admin/system/smart-upgrade": {
+		"title": "Smart Upgrade",
+		"order": 85,
+		"action": {
+			"type": "view",
+			"path": "smart-upgrade/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-smart-upgrade" ]
+		}
+	}
+}

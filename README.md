@@ -350,6 +350,17 @@ owut 输出本身也可能泄露自定义源 URL、主机名或错误中的凭�
 - 8 GiB `ROOTFS_PARTSIZE` 会生成大 ext4 分区；这不代表适合覆盖当前 NVMe 的人工分区布局。
 - 本仓库不自动执行 sysupgrade、`dd`、GPT 修改或配置迁移。
 
+## LuCI 只读界面（Sprint 3 T15）
+
+`luci-app-smart-upgrade/` 提供原生 LuCI JS 概览、只读扫描状态、软件包
+来源证据、服务/存储风险及 Snapshot 绑定的 Migration Report 查看与导出。
+它不使用外部 CDN，不接受 Shell 命令或文件路径参数，也不提供构建、刷写、
+重启、软件包或磁盘操作。目标信息只有在真实 Migration Plan 与当前 Snapshot
+匹配时才显示，否则保持 Unknown。详见 `docs/t15-luci-ui.md`。
+
+T05 / Issue #7 仍未完成：EFI 可由 Linux sysfs 肯定识别，但缺少可靠的
+Legacy BIOS 肯定证据。界面保留 `boot_mode=unknown`，不得据此自动选择镜像。
+
 ## 目录结构
 
 ```text
