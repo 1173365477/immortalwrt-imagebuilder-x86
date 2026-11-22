@@ -296,7 +296,7 @@ return view.extend({
 		var plan = planEnvelope.available === true && planEnvelope.plan &&
 			planEnvelope.plan.schema_version === '1.0.0' ? planEnvelope.plan : null;
 		var root = E('div', { 'class': 'smart-upgrade-page' }, [
-			E('h1', {}, _('Smart Upgrade')), 
+			E('h1', {}, _('Smart Upgrade')),
 			E('div', { 'class': 'alert-message warning' },
 				_('Read-only Sprint 3 view. Dispatch and flashing are disabled; build allowed never means flash ready.')),
 			this.renderOverview(snapshot, report),
