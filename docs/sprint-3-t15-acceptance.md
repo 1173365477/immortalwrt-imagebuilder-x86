@@ -47,8 +47,20 @@ Targeted T15 tests cover:
 - JavaScript syntax; and
 - absence of device mutation, build dispatch, reboot, or flash calls.
 
-Full test counts and the latest Draft PR CI URL are recorded in the PR after
-GitHub Actions completes.
+Verification on the functional implementation HEAD:
+
+- T15-specific tests: **19 passed**;
+- T15 plus workflow contract tests: **24 passed**;
+- Ubuntu full suite: **334 passed, 1 skipped** (335 collected);
+- actionlint, ShellCheck (including the rpcd provider), Python/YAML/JSON Schema,
+  pinned real apk-tools/APKv3, online index validation, and strict negative
+  gates: **passed**; and
+- Draft PR CI: <https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/44976938054>.
+
+On macOS, the unchanged storage scanner's GNU/BusyBox awk expressions remain
+incompatible with BSD awk. The platform-independent suite completed with 294
+passed and 1 skipped; authoritative scanner coverage is the successful Ubuntu
+CI above. No test was deleted, skipped, or weakened for T15.
 
 ## Remaining limitations
 
