@@ -1,13 +1,19 @@
 import json
+import hashlib
 import os
 from pathlib import Path
 import shlex
 import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from luci_evidence import create_bundle, publish_bundle
 APP = ROOT / "luci-app-smart-upgrade"
 RPC = APP / "root/usr/libexec/rpcd/smart_upgrade"
 MODEL = APP / "htdocs/luci-static/resources/smart-upgrade/model.js"
@@ -63,6 +69,7 @@ def snapshot(*, manager="opkg", boot="unknown", status="partial", packages=None)
         },
         "storage": {
             "status": "partial",
+            "evidence_digest": HEX,
             "scan_completeness": {
                 "containers": "unavailable",
                 "volumes": "unavailable",
@@ -89,14 +96,19 @@ def snapshot(*, manager="opkg", boot="unknown", status="partial", packages=None)
 
 
 def plan(snapshot_id=URN, *, flash_ready=False):
-    return {
+    value = {
         "schema_version": "1.0.0",
-        "plan_id": f"urn:sha256:{'b' * 64}",
-        "digest": "b" * 64,
+        "plan_id": "",
+        "digest": "",
         "source_snapshot_id": snapshot_id,
         "source_snapshot_digest": snapshot_id.removeprefix("urn:sha256:"),
         "privacy_mode": "redacted",
         "status": "blocked",
+        "source": {
+            "distribution": "ImmortalWrt", "version": "25.12.2",
+            "target": "x86/64", "profile": "generic", "architecture": "x86_64",
+            "package_manager": "opkg", "boot_mode": "unknown",
+        },
         "target": {
             "distribution": "immortalwrt",
             "version": "29.0.1",
@@ -104,24 +116,61 @@ def plan(snapshot_id=URN, *, flash_ready=False):
             "profile": "generic",
             "architecture": "x86_64",
             "package_manager": "apk",
+            "boot_mode": "unknown", "image_type": None,
+            "image_name": None, "image_sha256": None,
             "compatibility": "unknown",
         },
+        "release": {
+            "channel": "release", "resolution_digest": HEX,
+            "profiles_url": "https://example.invalid/profiles.json", "profiles_sha256": HEX,
+            "official_index_digest": HEX,
+            "package_index_sources": [{
+                "url": "https://example.invalid/packages.json", "sha256": HEX,
+                "checksum_manifest_url": "https://example.invalid/sha256sums",
+                "checksum_manifest_sha256": HEX, "checksum_entry": "packages.json",
+            }],
+            "imagebuilder_url": "https://example.invalid/imagebuilder.tar.zst",
+            "imagebuilder_sha256": HEX,
+        },
+        "package_summary": {"installed": 2, "keep": 0, "replace": 1, "skip": 0, "review": 1, "block": 0},
+        "storage_risk": {
+            "status": "partial", "docker_present": True,
+            "firmware_overwrite_risks": ["unknown"], "flash_blockers": ["storage unknown"],
+        },
+        "explicit_exclusions": [],
+        "strict_mode": True,
         "build_allowed": False,
+        "build_status": "not_started",
+        "compatibility_validated": False,
         "flash_ready": flash_ready,
         "decisions": [
             {
-                "package": "mystery", "decision": "review", "target_package": None,
-                "replacements": [], "reason": "official package missing", "compatible": None,
+                "package": "mystery", "source_version": None, "origin": "unknown",
+                "install_reason": "unknown", "decision": "review", "target_package": None,
+                "match_type": "unresolved", "provider": None,
+                "replacements": [], "conflicts": [], "dependencies": [],
+                "reason": "official package missing", "compatible": None,
+                "evidence": ["snapshot:unknown"],
             },
             {
-                "package": "old-addon", "decision": "replace", "target_package": "new-addon",
-                "replacements": ["new-addon"], "reason": "renamed", "compatible": True,
+                "package": "old-addon", "source_version": "1", "origin": "official",
+                "install_reason": "manual", "decision": "replace", "target_package": "new-addon",
+                "match_type": "replacement", "provider": None,
+                "replacements": ["new-addon"], "conflicts": [], "dependencies": [],
+                "reason": "renamed", "compatible": True, "evidence": ["rule:test"],
             },
         ],
         "blockers": ["boot mode unknown"],
         "warnings": ["storage scan partial"],
         "errors": [],
     }
+    identity = dict(value)
+    identity.pop("plan_id")
+    identity.pop("digest")
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    value["digest"] = digest
+    value["plan_id"] = f"urn:sha256:{digest}"
+    return value
 
 
 def make_rpc_tools(tmp_path):
@@ -198,6 +247,7 @@ except Exception:
 def rpc_harness(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
+    state.chmod(0o700)
     jshn, jsonfilter = make_rpc_tools(tmp_path)
     snapshot_file = tmp_path / "agent-snapshot.json"
     snapshot_file.write_text(json.dumps(snapshot()), encoding="utf-8")
@@ -209,23 +259,57 @@ def rpc_harness(tmp_path):
         encoding="utf-8",
     )
     agent.chmod(0o755)
+    boot_id = tmp_path / "boot-id"
+    boot_id.write_text("test-boot-id\n", encoding="ascii")
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+    setsid = tmp_path / "setsid"
+    setsid.write_text(
+        "#!/usr/bin/env python3\nimport os,sys\nos.setsid()\nos.execvp(sys.argv[1], sys.argv[1:])\n",
+        encoding="utf-8",
+    )
+    setsid.chmod(0o755)
     env = os.environ.copy()
     env.update(
         SMART_UPGRADE_STATE_DIR=str(state),
         SMART_UPGRADE_AGENT=str(agent),
         SMART_UPGRADE_JSONFILTER=str(jsonfilter),
         SMART_UPGRADE_JSHN_LIBRARY=str(jshn),
+        SMART_UPGRADE_EXPECTED_UID=str(os.getuid()),
+        SMART_UPGRADE_BOOT_ID_FILE=str(boot_id),
+        SMART_UPGRADE_PROC_ROOT=str(proc_root),
+        SMART_UPGRADE_SELF_START_TICKS="12345",
+        SMART_UPGRADE_SETSID=str(setsid),
     )
 
     def invoke(method, payload="{}"):
         result = subprocess.run(
             ["sh", str(RPC), "call", method], input=payload,
-            capture_output=True, text=True, env=env, timeout=10,
+            capture_output=True, text=True, env=env, timeout=30,
         )
         assert result.returncode == 0, result.stderr
         return json.loads(result.stdout)
 
     return state, snapshot_file, args_log, agent, env, invoke
+
+
+def published_snapshot(state):
+    generation = (state / "current-snapshot").read_text(encoding="ascii").split()[0]
+    return state / "snapshots" / generation / "system-snapshot-v1.json"
+
+
+def publish_analysis(state, tmp_path, value=None, report="# Migration\nBlocked.\n"):
+    bundle = tmp_path / "analysis-source"
+    bundle.mkdir(exist_ok=True)
+    plan_path = bundle / "migration-plan-v1.json"
+    report_path = bundle / "migration-report.md"
+    plan_path.write_text(json.dumps(value or plan()), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+    create_bundle(
+        published_snapshot(state), plan_path, report_path, bundle, ROOT,
+        producer_commit="d" * 40,
+    )
+    return publish_bundle(bundle, state, ROOT)
 
 
 def node_model(method, *args):
@@ -266,8 +350,9 @@ def test_rpc_scan_is_fixed_redacted_and_preserves_partial_result(rpc_harness):
     assert args_log.read_text().strip() == "--privacy redacted"
     envelope = invoke("snapshot")
     assert envelope["available"] is True
+    assert envelope["integrity_status"] == "verified"
     assert envelope["snapshot"]["snapshot_id"] == URN
-    assert (state / "system-snapshot-v1.json").is_file()
+    assert published_snapshot(state).is_file()
     assert not forbidden.exists()
 
 
@@ -284,23 +369,22 @@ def test_rpc_scan_failure_is_explicit_and_keeps_safety_false(rpc_harness):
 
 def test_report_requires_real_files_and_rejects_unsafe_plan(rpc_harness):
     state, _, _, _, _, invoke = rpc_harness
-    assert invoke("report")["error_code"] == "REPORT_MISSING"
+    assert invoke("report")["error_code"] == "EVIDENCE_UNVERIFIED"
     (state / "migration-report.md").write_text("# report\n", encoding="utf-8")
     (state / "migration-plan-v1.json").write_text("not-json", encoding="utf-8")
-    assert invoke("report")["error_code"] == "REPORT_INVALID"
+    assert invoke("report")["error_code"] == "EVIDENCE_UNVERIFIED"
     (state / "migration-plan-v1.json").write_text(
         json.dumps(plan(flash_ready=True)), encoding="utf-8"
     )
     result = invoke("report")
-    assert result["error_code"] == "REPORT_INVALID"
+    assert result["error_code"] == "EVIDENCE_UNVERIFIED"
     assert result["flash_ready"] is False
 
 
 def test_report_binds_snapshot_and_exposes_server_blockers(rpc_harness):
     state, _, _, _, _, invoke = rpc_harness
     invoke("scan")
-    (state / "migration-plan-v1.json").write_text(json.dumps(plan()), encoding="utf-8")
-    (state / "migration-report.md").write_text("# Migration\nBlocked.\n", encoding="utf-8")
+    publish_analysis(state, state.parent)
     report = invoke("report")
     assert report["available"] is True
     assert report["integrity_status"] == "matched"
@@ -318,13 +402,283 @@ def test_report_binds_snapshot_and_exposes_server_blockers(rpc_harness):
 
 
 def test_report_snapshot_mismatch_is_not_silently_trusted(rpc_harness):
+    state, snapshot_file, _, _, _, invoke = rpc_harness
+    invoke("scan")
+    publish_analysis(state, state.parent)
+    changed = snapshot()
+    changed["digest"]["value"] = "c" * 64
+    changed["snapshot_id"] = f"urn:sha256:{'c' * 64}"
+    snapshot_file.write_text(json.dumps(changed), encoding="utf-8")
+    invoke("scan")
+    report = invoke("report")
+    assert report["available"] is False
+    assert report["error_code"] == "EVIDENCE_UNVERIFIED"
+    assert "target_version" not in report
+    assert invoke("plan")["error_code"] == "EVIDENCE_UNVERIFIED"
+
+
+def test_state_directory_symlink_is_rejected_without_changing_target(rpc_harness):
+    state, _, _, _, _, invoke = rpc_harness
+    state.rmdir()
+    victim = state.parent / "victim"
+    victim.mkdir(mode=0o755)
+    state.symlink_to(victim, target_is_directory=True)
+    result = invoke("status")
+    assert result["error_code"] == "STATE_DIRECTORY_UNSAFE"
+    assert victim.stat().st_mode & 0o777 == 0o755
+
+
+@pytest.mark.parametrize("kind", ["file", "fifo"])
+def test_non_directory_state_object_is_rejected(rpc_harness, kind):
+    state, _, _, _, _, invoke = rpc_harness
+    state.rmdir()
+    if kind == "file":
+        state.write_text("not a directory", encoding="utf-8")
+    else:
+        os.mkfifo(state)
+    result = invoke("status")
+    assert result["error_code"] == "STATE_DIRECTORY_UNSAFE"
+
+
+def test_state_directory_owner_and_permissions_fail_closed(rpc_harness):
+    state, _, _, _, env, invoke = rpc_harness
+    state.chmod(0o777)
+    assert invoke("status")["error_code"] == "STATE_DIRECTORY_UNSAFE"
+    state.chmod(0o700)
+    env["SMART_UPGRADE_EXPECTED_UID"] = str(os.getuid() + 1)
+    assert invoke("status")["error_code"] in {"STATE_PARENT_UNSAFE", "STATE_DIRECTORY_UNSAFE"}
+
+
+def test_concurrent_first_state_creation_is_atomic(rpc_harness):
+    state, _, _, _, env, _ = rpc_harness
+    state.rmdir()
+    environments = []
+    for index in range(2):
+        tools_dir = state.parent / f"worker-{index}"
+        tools_dir.mkdir()
+        jshn, jsonfilter = make_rpc_tools(tools_dir)
+        worker = env.copy()
+        worker["SMART_UPGRADE_JSHN_LIBRARY"] = str(jshn)
+        worker["SMART_UPGRADE_JSONFILTER"] = str(jsonfilter)
+        environments.append(worker)
+
+    def call(worker):
+        result = subprocess.run(
+            ["sh", str(RPC), "call", "status"], input="{}", text=True,
+            capture_output=True, env=worker, timeout=30, check=True,
+        )
+        return json.loads(result.stdout)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(call, environments))
+    assert [row["scan_status"] for row in results] == ["idle", "idle"]
+    assert state.stat().st_mode & 0o777 == 0o700
+
+
+def test_status_is_rebuilt_and_ignores_forged_safety_fields(rpc_harness):
+    state, _, _, _, _, invoke = rpc_harness
+    invoke("status")
+    status_path = state / "scan-state.json"
+    status_path.write_text(json.dumps({
+        "scan_status": "completed", "started_at": "2026-11-24T00:00:00Z",
+        "completed_at": "2026-11-24T00:00:01Z", "snapshot_id": URN,
+        "snapshot_status": "partial", "error_code": "", "error_message": "",
+        "dispatch_allowed": True, "flash_ready": True, "unknown": "ignored",
+    }), encoding="utf-8")
+    status_path.chmod(0o600)
+    result = invoke("status")
+    assert result["scan_status"] == "completed"
+    assert result["dispatch_allowed"] is False
+    assert result["flash_ready"] is False
+    assert "unknown" not in result
+
+
+@pytest.mark.parametrize("payload", [
+    "not-json",
+    json.dumps({"scan_status": "unsafe"}),
+    json.dumps({
+        "scan_status": "failed", "started_at": "bad-time", "completed_at": "",
+        "snapshot_id": "", "snapshot_status": "failed", "error_code": "E",
+        "error_message": "x",
+    }),
+])
+def test_invalid_status_fails_closed(rpc_harness, payload):
+    state, _, _, _, _, invoke = rpc_harness
+    invoke("status")
+    status_path = state / "scan-state.json"
+    status_path.write_text(payload, encoding="utf-8")
+    status_path.chmod(0o600)
+    result = invoke("status")
+    assert result["available"] is False
+    assert result["error_code"] == "STATUS_INVALID"
+    assert result["dispatch_allowed"] is False
+    assert result["flash_ready"] is False
+
+
+def test_status_symlink_and_oversize_are_rejected(rpc_harness):
+    state, _, _, _, _, invoke = rpc_harness
+    invoke("status")
+    target = state.parent / "external-status"
+    target.write_text("{}", encoding="utf-8")
+    (state / "scan-state.json").symlink_to(target)
+    assert invoke("status")["error_code"] == "STATUS_UNSAFE"
+    (state / "scan-state.json").unlink()
+    (state / "scan-state.json").write_text("x" * 65537, encoding="ascii")
+    (state / "scan-state.json").chmod(0o600)
+    assert invoke("status")["error_code"] == "STATUS_UNSAFE"
+
+
+def write_lock(state, *, boot="test-boot-id", pid="123", ticks="999", valid=True):
+    lock = state / "scan.lock"
+    lock.mkdir(mode=0o700)
+    owner = lock / "owner.json"
+    owner.write_text(json.dumps({
+        "schema_version": "1.0.0", "pid": pid, "boot_id": boot,
+        "process_start_ticks": ticks, "created_at": "2026-11-24T00:00:00Z",
+    }) if valid else "broken", encoding="utf-8")
+    owner.chmod(0o600)
+
+
+def write_proc_stat(proc_root, pid="123", ticks="999"):
+    directory = proc_root / pid
+    directory.mkdir(parents=True, exist_ok=True)
+    # After the closing parenthesis, process start time is Linux /proc stat field 22,
+    # which is the twentieth whitespace field consumed by the provider.
+    fields = ["S"] + ["0"] * 18 + [ticks] + ["0"] * 4
+    (directory / "stat").write_text(f"{pid} (scanner) " + " ".join(fields) + "\n", encoding="ascii")
+
+
+def test_live_scan_lock_remains_busy(rpc_harness):
+    state, _, _, _, env, invoke = rpc_harness
+    invoke("status")
+    write_lock(state)
+    write_proc_stat(Path(env["SMART_UPGRADE_PROC_ROOT"]))
+    assert invoke("scan")["error_code"] == "SCAN_BUSY"
+    assert (state / "scan.lock").is_dir()
+
+
+@pytest.mark.parametrize("mode", ["missing-process", "pid-reuse", "new-boot"])
+def test_proven_stale_lock_is_isolated_and_requires_retry(rpc_harness, mode):
+    state, _, _, _, env, invoke = rpc_harness
+    invoke("status")
+    write_lock(state, boot="old-boot" if mode == "new-boot" else "test-boot-id")
+    if mode == "pid-reuse":
+        write_proc_stat(Path(env["SMART_UPGRADE_PROC_ROOT"]), ticks="1000")
+    result = invoke("scan")
+    assert result["error_code"] == "LOCK_RECOVERED"
+    assert not (state / "scan.lock").exists()
+    assert any((state / "recovered-locks").iterdir())
+    # Recovery never starts the scan; a new explicit request is required.
+    assert invoke("scan")["scan_status"] == "partial"
+
+
+def test_corrupt_or_symlink_lock_is_not_removed(rpc_harness):
+    state, _, _, _, _, invoke = rpc_harness
+    invoke("status")
+    write_lock(state, valid=False)
+    assert invoke("scan")["error_code"] == "LOCK_UNVERIFIABLE"
+    assert (state / "scan.lock").is_dir()
+    (state / "scan.lock/owner.json").unlink()
+    (state / "scan.lock").rmdir()
+    target = state.parent / "lock-target"
+    target.mkdir()
+    (state / "scan.lock").symlink_to(target, target_is_directory=True)
+    assert invoke("scan")["error_code"] == "LOCK_UNVERIFIABLE"
+    assert target.is_dir()
+
+
+def test_overall_timeout_kills_process_group_and_releases_lock(rpc_harness):
+    state, _, _, agent, env, invoke = rpc_harness
+    child_pid = state.parent / "child-pid"
+    agent.write_text(
+        "#!/bin/sh\nsleep 20 &\nprintf '%s\\n' \"$!\" > \"$CHILD_PID\"\nwait\n",
+        encoding="utf-8",
+    )
+    agent.chmod(0o755)
+    env["CHILD_PID"] = str(child_pid)
+    env["SMART_UPGRADE_SCAN_TIMEOUT"] = "1"
+    result = invoke("scan")
+    assert result["scan_status"] == "failed"
+    assert result["error_code"] == "SCAN_TIMEOUT"
+    assert result["dispatch_allowed"] is False
+    assert result["flash_ready"] is False
+    assert not (state / "scan.lock").exists()
+    pid = int(child_pid.read_text().strip())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_term_during_scan_kills_children_and_releases_lock(rpc_harness):
+    state, _, _, agent, env, _ = rpc_harness
+    child_pid = state.parent / "term-child-pid"
+    agent.write_text(
+        "#!/bin/sh\nsleep 20 &\nprintf '%s\\n' \"$!\" > \"$CHILD_PID\"\nwait\n",
+        encoding="utf-8",
+    )
+    agent.chmod(0o755)
+    env["CHILD_PID"] = str(child_pid)
+    process = subprocess.Popen(
+        ["sh", str(RPC), "call", "scan"], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    assert process.stdin
+    process.stdin.write("{}")
+    process.stdin.close()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not child_pid.exists():
+        time.sleep(0.05)
+    assert child_pid.exists()
+    pid = int(child_pid.read_text().strip())
+    process.terminate()
+    process.wait(timeout=10)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("scanner child remained alive after TERM")
+    assert not (state / "scan.lock").exists()
+
+
+def test_rpc_rejects_any_changed_published_evidence_bytes(rpc_harness):
     state, _, _, _, _, invoke = rpc_harness
     invoke("scan")
-    other = f"urn:sha256:{'c' * 64}"
-    (state / "migration-plan-v1.json").write_text(json.dumps(plan(other)), encoding="utf-8")
-    (state / "migration-report.md").write_text("# stale\n", encoding="utf-8")
-    assert invoke("report")["integrity_status"] == "mismatch"
-    assert invoke("plan")["error_code"] == "REPORT_SNAPSHOT_MISMATCH"
+    generation = publish_analysis(state, state.parent)
+    analysis = state / "analyses" / generation
+    for name in (
+        "system-snapshot-v1.json", "migration-plan-v1.json",
+        "migration-report.md", "luci-evidence-bundle-v1.json",
+    ):
+        path = analysis / name
+        original = path.read_bytes()
+        path.write_bytes(original + b" ")
+        result = invoke("report")
+        assert result["available"] is False, name
+        assert result["error_code"] == "EVIDENCE_UNVERIFIED", name
+        assert result.get("build_allowed", False) is False
+        assert result["flash_ready"] is False
+        path.write_bytes(original)
+
+
+def test_rpc_rejects_changed_snapshot_bytes(rpc_harness):
+    state, _, _, _, _, invoke = rpc_harness
+    invoke("scan")
+    path = published_snapshot(state)
+    original = path.read_bytes()
+    path.write_bytes(original + b" ")
+    result = invoke("snapshot")
+    assert result["available"] is False
+    assert result["error_code"] == "SNAPSHOT_UNVERIFIED"
+    assert result["flash_ready"] is False
+    path.unlink()
+    external = state.parent / "external-snapshot.json"
+    external.write_bytes(original)
+    external.chmod(0o600)
+    path.symlink_to(external)
+    assert invoke("snapshot")["error_code"] == "SNAPSHOT_UNVERIFIED"
 
 
 @pytest.mark.parametrize("manager", ["opkg", "apk"])
