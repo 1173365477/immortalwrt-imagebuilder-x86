@@ -308,7 +308,8 @@ run_agent_bounded() {
 	command -v "$SETSID" >/dev/null 2>&1 || return 125
 	RUN_RESULT_FILE=$(mktemp "$STATE_DIR/.scan-result.XXXXXX")
 	rm -f "$RUN_RESULT_FILE"
-	# shellcheck disable=SC2016 -- positional parameters are expanded by the child shell.
+	# Positional parameters are deliberately expanded by the child shell.
+	# shellcheck disable=SC2016
 	"$SETSID" sh -c '
 		if "$1" --privacy redacted > "$2" 2> "$3"; then result=0; else result=$?; fi
 		printf "%s\n" "$result" > "$4"

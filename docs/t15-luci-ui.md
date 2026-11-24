@@ -24,7 +24,7 @@ compatibility, build permission, image selection, or flash safety.
 |---|---|
 | `htdocs/luci-static/resources/view/smart-upgrade/overview.js` | LuCI page, RPC error presentation, scan action, report export |
 | `htdocs/luci-static/resources/smart-upgrade/model.js` | Presentation-only normalization; retains every installed package and maps invalid origins to `unknown` |
-| `root/usr/libexec/rpcd/smart_upgrade` | Fixed-method rpcd provider with no client-controlled path or command |
+| `root/usr/libexec/rpcd/smart_upgrade` | Fixed-method rpcd provider, secure state/bundle consumer, bounded scan supervisor |
 | `root/usr/share/rpcd/acl.d/luci-app-smart-upgrade.json` | Read ACL for evidence; separate write ACL only for starting the read-only scan |
 | `scripts/smart-upgrade-agent.sh` | Existing read-only `system-snapshot-v1` producer installed by the package |
 | `scripts/smart-upgrade-storage.sh` | Existing bounded storage and Docker evidence helper installed by the package |
@@ -42,32 +42,68 @@ Object: `smart_upgrade`
 | `status` | read | none | `scan_status`, timestamps, Snapshot identity/status, stable error, and false safety flags |
 | `scan` | write | none | Runs only the fixed agent with `--privacy redacted`; returns the updated status |
 | `snapshot` | read | none | Validated scanner envelope containing the complete Snapshot |
-| `plan` | read | none | Safety envelope with a bounded Plan only after server-side Snapshot identity and `flash_ready=false` checks |
-| `report` | read | none | Fixed local Plan/Report envelope, Snapshot binding state, server-supplied blockers and target data |
+| `plan` | read | none | Matched Plan only after immutable Bundle seal, byte hashes, identities, binding and safety checks |
+| `report` | read | none | Matched Report only from the same verified Bundle; otherwise unavailable |
 
 Every response produced by the provider keeps `dispatch_allowed=false` and
 `flash_ready=false`. The input JSON is consumed but is never interpolated into
 a path or command. In particular, the RPC surface accepts no package, service,
 device, root, report path, URL, or shell command argument.
 
-Runtime state is stored with mode `0700` below `/tmp/smart-upgrade`:
+Runtime state is stored below `/tmp/smart-upgrade`. The provider atomically
+creates the directory with mode `0700`, requires the configured root UID, and
+rejects links, FIFOs, devices, unsafe modes, unsafe owners and unexpected file
+types before reading or changing them. It never `chmod`s an unverified path.
 
-- `scan-state.json`;
-- `system-snapshot-v1.json`;
-- `migration-plan-v1.json` (optional, supplied by the trusted analysis path);
-- `migration-report.md` (optional, supplied with the Plan).
+- `scan-state.json` is parsed and reconstructed from a field allow-list;
+- `snapshots/<generation>/` contains an immutable Snapshot and byte-integrity
+  manifest selected through the atomically replaced `current-snapshot` file;
+- `analyses/<bundle-digest>/` contains an immutable Snapshot, Plan, Report and
+  `luci-evidence-bundle-v1.json`, selected through `current-analysis`; and
+- `recovered-locks/` retains proven stale lock ownership evidence for audit.
 
-The scanner writes to a private temporary file, verifies the schema version,
-redacted privacy mode, status, Snapshot ID/digest binding and size, then uses an
-atomic rename. A lock directory rejects concurrent scans. Scanner stderr is not
-returned to LuCI.
+The scanner writes a complete generation in a private directory, binds its
+actual file SHA256 to the existing `evidence-sha256-v2` identity, then publishes
+only an atomic pointer. The evidence identity is not redefined as a JSON file
+hash. A scan has a fixed 180-second deadline, is launched in an isolated process
+group, and TERM/timeout stops its descendants. Scanner stderr is private and is
+never returned to LuCI.
 
-The Report endpoint requires both fixed files, bounded sizes, Plan schema and
-identity fields, and `flash_ready=false`. A Plan whose `source_snapshot_id`
-does not equal the current Snapshot is returned with `integrity_status=mismatch`;
-the overview therefore keeps target fields Unknown. Report export creates a
-browser-side Markdown Blob from the exact server response and performs no
-router write.
+The lock owner record binds PID, Linux process start ticks and boot ID. A live
+owner returns `SCAN_BUSY`. A provably exited/reused PID or old boot is atomically
+isolated and returns `LOCK_RECOVERED`; the recovery request never starts a scan.
+Damaged or unverifiable ownership fails closed.
+
+`generate-migration-plan.py` performs the complete existing Snapshot and Plan
+JSON Schema validation and verifies the Plan canonical digest before generating
+a versioned LuCI Evidence Bundle. `publish-luci-evidence.py` revalidates every
+file and atomically publishes a new immutable analysis generation while keeping
+the previous generation and pointer on failure. The router package does not
+install or expose that Python publisher; when no trusted local producer exists,
+Plan and Report RPCs remain unavailable.
+
+The rpcd consumer checks root ownership, regular-file type, size, immutable
+manifest seal, every file SHA256, producer/version fields, Snapshot identity,
+Plan identity, Snapshot/Plan binding, privacy and false safety flags before
+returning data. Any missing, mixed, stale or changed byte makes Plan and Report
+unavailable; target, compatibility and build permission are not returned.
+Report export creates a browser-side Markdown Blob from a matched response and
+performs no router write.
+
+## Evidence Bundle v1
+
+`schemas/luci-evidence-bundle-v1.json` binds:
+
+- the actual SHA256 of Snapshot, Plan and Markdown Report files;
+- the unchanged `evidence-sha256-v2` Snapshot ID;
+- the existing canonical Migration Plan digest and Plan ID;
+- Snapshot/Plan source identity;
+- full producer-side Schema validation results;
+- producer name, version and Git commit; and
+- `dispatch_allowed=false` and `flash_ready=false`.
+
+The manifest itself has canonical bytes, a canonical bundle digest and an
+actual byte SHA256 sealed into the atomic current-generation pointer.
 
 ## Identity and T05 limitation
 
@@ -88,7 +124,7 @@ Consequences for T15 are deliberate and fail closed:
 - target version and compatibility remain Unknown until a real local Migration
   Plan matching the current Snapshot is present;
 - the page cannot request a build and never displays Gateway dispatch controls;
-- a missing Plan/Report is an explicit `REPORT_MISSING`, not an empty or safe
+- a missing or unverified Plan/Report is explicit `EVIDENCE_UNVERIFIED`, not an empty or safe
   report.
 
 T16 may add authenticated remote-operation UX only after those server
@@ -106,5 +142,12 @@ The page layout and all displayed fields are reviewable without a router in:
   mismatch, and forbidden mutation/dispatch actions.
 
 The tests execute the JavaScript model with Node and exercise the real rpcd
-shell entry through fake `jshn`/`jsonfilter` and a fixed fake agent. They do not
-connect to a router or GitHub Actions.
+shell entry through fake `jshn`/`jsonfilter` and controlled agents. They cover
+filesystem object types, owner/mode checks, concurrent creation, bundle byte
+tampering, status reconstruction, PID/boot/start-time lock recovery, timeout and
+TERM process-group cleanup. A dynamic Make harness exercises the real package
+Makefile callback and inspects an IPK-format `data.tar.gz` staging archive.
+
+These remain mocked host-side integration tests: no real OpenWrt rpcd/ubus
+session or browser engine is claimed, and the staging harness is not a complete
+OpenWrt SDK build.
