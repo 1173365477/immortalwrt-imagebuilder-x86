@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/1173365477/immortalwrt-imagebuilder-x86/schemas/luci-evidence-bundle-v1.json",
+  "title": "LuCI Smart Upgrade trusted evidence bundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "bundle_id", "digest", "created_at", "producer", "validation", "snapshot", "plan", "report", "binding", "safety"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "bundle_id": {"$ref": "#/$defs/urn"},
+    "digest": {"$ref": "#/$defs/hex"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "producer": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "version", "commit"],
+      "properties": {
+        "name": {"const": "smart-upgrade-migration-plan"},
+        "version": {"const": "1"},
+        "commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"}
+      }
+    },
+    "validation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["snapshot_schema", "plan_schema", "plan_canonical_digest"],
+      "properties": {
+        "snapshot_schema": {"const": "passed"},
+        "plan_schema": {"const": "passed"},
+        "plan_canonical_digest": {"const": "passed"}
+      }
+    },
+    "snapshot": {"$ref": "#/$defs/snapshot"},
+    "plan": {"$ref": "#/$defs/plan"},
+    "report": {"$ref": "#/$defs/report"},
+    "binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_snapshot_id", "source_snapshot_digest"],
+      "properties": {
+        "source_snapshot_id": {"$ref": "#/$defs/urn"},
+        "source_snapshot_digest": {"$ref": "#/$defs/hex"}
+      }
+    },
+    "safety": {
+      "type": "object", "additionalProperties": false,
+      "required": ["build_allowed", "compatibility_validated", "dispatch_allowed", "flash_ready"],
+      "properties": {
+        "build_allowed": {"type": "boolean"},
+        "compatibility_validated": {"type": "boolean"},
+        "dispatch_allowed": {"const": false},
+        "flash_ready": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "hex": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "urn": {"type": "string", "pattern": "^urn:sha256:[a-f0-9]{64}$"},
+    "snapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["filename", "file_sha256", "schema_version", "snapshot_id", "evidence_digest", "privacy_mode"],
+      "properties": {
+        "filename": {"const": "system-snapshot-v1.json"}, "file_sha256": {"$ref": "#/$defs/hex"},
+        "schema_version": {"const": "1.0.0"}, "snapshot_id": {"$ref": "#/$defs/urn"},
+        "evidence_digest": {"$ref": "#/$defs/hex"}, "privacy_mode": {"const": "redacted"}
+      }
+    },
+    "plan": {
+      "type": "object", "additionalProperties": false,
+      "required": ["filename", "file_sha256", "schema_version", "plan_id", "canonical_digest", "privacy_mode"],
+      "properties": {
+        "filename": {"const": "migration-plan-v1.json"}, "file_sha256": {"$ref": "#/$defs/hex"},
+        "schema_version": {"const": "1.0.0"}, "plan_id": {"$ref": "#/$defs/urn"},
+        "canonical_digest": {"$ref": "#/$defs/hex"}, "privacy_mode": {"const": "redacted"}
+      }
+    },
+    "report": {
+      "type": "object", "additionalProperties": false,
+      "required": ["filename", "file_sha256", "format"],
+      "properties": {
+        "filename": {"const": "migration-report.md"}, "file_sha256": {"$ref": "#/$defs/hex"},
+        "format": {"const": "markdown"}
+      }
+    }
+  }
+}
