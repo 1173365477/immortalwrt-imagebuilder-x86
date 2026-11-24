@@ -55,9 +55,17 @@ The remediation additionally covers:
 - active, stale, reused-PID, old-boot and corrupt scan locks; and
 - timeout/TERM descendant cleanup and lock release.
 
-Verification numbers and final CI for the remediation HEAD are recorded in the
-PR description after GitHub Actions completes. Validation layers are explicitly
-separated:
+Verification on the remediation implementation HEAD before the documentation-only
+evidence update:
+
+- Ubuntu full suite: **373 passed, 1 skipped**;
+- pinned real apk-tools/APKv3 integration: **1 passed**;
+- actionlint, ShellCheck, Python/YAML/JSON Schema, online index validation and
+  strict negative gates: **passed**; and
+- push CI: <https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/45381474807>;
+- PR CI: <https://github.com/1173365477/immortalwrt-imagebuilder-x86/actions/runs/45381486644>.
+
+Validation layers are explicitly separated:
 
 - Python performs full Snapshot, Plan and Evidence Bundle Schema validation and
   canonical Plan digest verification in the trusted producer/publisher path;
