@@ -140,6 +140,48 @@ def test_unknown_boot_and_wrong_architecture_block_build():
     assert plan["build_allowed"] is False
 
 
+@pytest.mark.parametrize(("field", "value", "reason", "status"), [
+    ("identity_status", "conflict", "source system identity is conflicted", "incompatible"),
+    ("identity_status", "unknown", "source system identity is not confirmed", "unknown"),
+    ("target", "x86/generic", "source target", "incompatible"),
+    ("profile", "other", "source profile", "incompatible"),
+    ("package_architecture", "aarch64_generic", "source package architecture", "incompatible"),
+    ("architecture", "aarch64_generic", "source architecture", "incompatible"),
+    ("kernel_architecture", "aarch64", "source kernel architecture", "incompatible"),
+    ("kernel_architecture", None, "source kernel architecture", "unknown"),
+    ("boot_mode", "unknown", "boot mode is unknown", "unknown"),
+    ("boot_mode", "bios", "boot mode is unknown", "unknown"),
+    ("boot_evidence", "fixture_override", "boot mode is unknown", "unknown"),
+])
+def test_each_identity_failure_blocks_an_otherwise_eligible_plan(field, value, reason, status):
+    data = snapshot()
+    data["system"][field] = value
+    index = official_index()
+    plan = generate_plan(data, target(index), index, rules(), strict_mode=True)
+    assert plan["status"] == "blocked"
+    assert plan["target"]["compatibility"] == status
+    assert len(plan["blockers"]) == 1 and reason in plan["blockers"][0]
+    assert plan["build_allowed"] is plan["flash_ready"] is False
+
+
+@pytest.mark.parametrize("mode", ["efi", "unknown"])
+def test_combined_image_rejects_unproven_or_efi_boot(mode):
+    data = snapshot()
+    data["system"]["boot_mode"] = mode
+    if mode == "unknown":
+        data["system"]["boot_evidence"] = "no_affirmative_evidence"
+    index = official_index()
+    capabilities = target(index)
+    capabilities["image_type"] = "combined"
+    capabilities["resolution_digest"] = canonical_digest({
+        key: value for key, value in capabilities.items() if key != "resolution_digest"
+    })
+    plan = generate_plan(data, capabilities, index, rules())
+    expected = "EFI source requires" if mode == "efi" else "boot mode is unknown"
+    assert len(plan["blockers"]) == 1 and expected in plan["blockers"][0]
+    assert plan["build_allowed"] is plan["flash_ready"] is False
+
+
 def test_snapshot_and_release_digest_mismatch_fail_closed():
     data = snapshot()
     data["snapshot_id"] = "urn:sha256:" + "9" * 64

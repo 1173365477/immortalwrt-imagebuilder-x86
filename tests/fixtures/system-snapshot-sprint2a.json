@@ -7,7 +7,7 @@
   "system": {
     "distribution": "ImmortalWrt", "version": "25.12.2", "target": "x86/64", "profile": "generic",
     "architecture": "x86_64", "package_architecture": "x86_64", "kernel_architecture": "x86_64",
-    "boot_mode": "efi", "boot_evidence": "fixture_override", "rootfs_type": "overlay",
+    "boot_mode": "efi", "boot_evidence": "linux_efi_sysfs", "rootfs_type": "overlay",
     "firmware_image_type": "combined-efi", "package_manager": "apk", "identity_status": "consistent", "identity_errors": []
   },
   "packages": {
