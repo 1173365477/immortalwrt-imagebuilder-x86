@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+from contextlib import closing
 import sqlite3
 from pathlib import Path
 
@@ -140,16 +141,20 @@ def test_persistent_rate_limit_survives_store_recreation(tmp_path):
 
 def test_credentials_are_device_scoped_rotatable_and_stored_as_hashes(tmp_path):
     store = store_at(tmp_path / "gateway.db")
-    old = store.issue_credential("router-a", ttl_seconds=100, now=1)
-    new = store.issue_credential("router-a", ttl_seconds=100, now=1)
-    assert store.authenticate(old, now=2).device_id == "router-a"
-    assert store.authenticate(new, now=2).device_id == "router-a"
-    store.revoke_credential(old.split(".", 1)[0], now=3)
-    with pytest.raises(GatewayError):
-        store.authenticate(old, now=4)
-    assert store.authenticate(new, now=4).device_id == "router-a"
+    # Keep the WAL open across writes. SQLite can remove it when the last
+    # connection closes, independently of the credential storage behavior.
+    with closing(sqlite3.connect(store.path)) as observer:
+        observer.execute("SELECT name FROM sqlite_master").fetchall()
+        old = store.issue_credential("router-a", ttl_seconds=100, now=1)
+        new = store.issue_credential("router-a", ttl_seconds=100, now=1)
+        assert store.authenticate(old, now=2).device_id == "router-a"
+        assert store.authenticate(new, now=2).device_id == "router-a"
+        store.revoke_credential(old.split(".", 1)[0], now=3)
+        with pytest.raises(GatewayError):
+            store.authenticate(old, now=4)
+        assert store.authenticate(new, now=4).device_id == "router-a"
 
-    raw = store.path.read_bytes() + (store.path.parent / f"{store.path.name}-wal").read_bytes()
+        raw = store.path.read_bytes() + store.path.with_suffix(".db-wal").read_bytes()
     assert old.encode() not in raw
     assert new.encode() not in raw
 
