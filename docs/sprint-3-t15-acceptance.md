@@ -55,8 +55,7 @@ The remediation additionally covers:
 - active, stale, reused-PID, old-boot and corrupt scan locks; and
 - timeout/TERM descendant cleanup and lock release.
 
-Verification on the remediation implementation HEAD before the documentation-only
-evidence update:
+Historical verification before the follow-up to F3, F6 and F7:
 
 - Ubuntu full suite: **373 passed, 1 skipped**;
 - pinned real apk-tools/APKv3 integration: **1 passed**;
@@ -80,6 +79,13 @@ incompatible with BSD awk. The final Linux GitHub Actions run remains the
 authoritative scanner validation. No test was deleted, skipped, or weakened.
 
 ## Remaining limitations
+
+The follow-up verifies Prepare and Install using the pinned OpenWrt LuCI
+`openwrt-25.12` rules at `cb87fe60e1e2e052af36a93647f2264577829e0a` with a
+minimal buildroot harness. CI exercises the process group with the BusyBox ash
+and setsid from the checksum-pinned Alpine rootfs on Linux. Full target SDK
+packaging and actual OpenWrt rpcd/ubus runtime remain unverified. The current
+PR checks are available on [PR #26](https://github.com/1173365477/immortalwrt-imagebuilder-x86/pull/26/checks).
 
 - No affirmative Legacy BIOS evidence: Issue #7 remains open.
 - No live router/browser screenshot is produced in this sprint; source-level DOM,

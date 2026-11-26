@@ -1,4 +1,5 @@
 import io
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -7,6 +8,9 @@ import tarfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+OFFICIAL_LUCI_MK = ROOT / "tests/fixtures/openwrt-luci-25.12-luci.mk"
+OFFICIAL_LUCI_COMMIT = "cb87fe60e1e2e052af36a93647f2264577829e0a"
+OFFICIAL_LUCI_MK_SHA256 = "9716c9a7a1c276b867df5887558e2b63b78f7d3695915adb7fcd0a7f0182ed0d"
 
 
 def test_luci_prepare_callback_stages_complete_executable_package(tmp_path):
@@ -91,3 +95,77 @@ def test_luci_prepare_callback_stages_complete_executable_package(tmp_path):
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
         members = {member.name.removeprefix("./") for member in archive.getmembers()}
     assert set(expected).issubset(members)
+
+
+def test_pinned_official_luci_25_12_rules_execute_package_prepare(tmp_path):
+    """Execute this package's callback through the pinned official LuCI rules.
+
+    The fixture is openwrt/luci openwrt-25.12 at OFFICIAL_LUCI_COMMIT. This
+    validates the real LuCI Make contract, but is intentionally not represented
+    as a complete target SDK build or an installable target IPK.
+    """
+    assert hashlib.sha256(OFFICIAL_LUCI_MK.read_bytes()).hexdigest() == OFFICIAL_LUCI_MK_SHA256
+    workspace = tmp_path / "workspace"
+    package = workspace / "luci-app-smart-upgrade"
+    scripts = workspace / "scripts"
+    shutil.copytree(ROOT / "luci-app-smart-upgrade", package)
+    scripts.mkdir(parents=True)
+    for name in ("smart-upgrade-agent.sh", "smart-upgrade-storage.sh"):
+        shutil.copy2(ROOT / "scripts" / name, scripts / name)
+
+    topdir = tmp_path / "openwrt"
+    include_dir = topdir / "include"
+    (topdir / "feeds/luci").mkdir(parents=True)
+    include_dir.mkdir()
+    shutil.copy2(OFFICIAL_LUCI_MK, topdir / "feeds/luci/luci.mk")
+    (topdir / "rules.mk").write_text(
+        "BUILD_DIR:=$(TOPDIR)/build\n"
+        "INCLUDE_DIR:=$(TOPDIR)/include\n"
+        "INSTALL_DIR:=install -d -m0755\n"
+        "INSTALL_BIN:=install -m0755\n"
+        "CP:=cp -fpR\n"
+        "FIND:=find\nXARGS:=xargs\n",
+        encoding="utf-8",
+    )
+    (include_dir / "package.mk").write_text(
+        "define Build/Prepare/Default\nendef\n"
+        "define BuildPackage\nendef\n",
+        encoding="utf-8",
+    )
+    validation = package / "official-validation.mk"
+    validation.write_text(
+        "include ./Makefile\n"
+        "define OfficialStage\n"
+        ".PHONY: official-stage\n"
+        "official-stage:\n"
+        "\t@rm -rf $$(PKG_BUILD_DIR) $$(TOPDIR)/stage\n"
+        "\t@mkdir -p $$(PKG_BUILD_DIR) $$(TOPDIR)/stage/www\n"
+        "\t$(Build/Prepare)\n"
+        "endef\n"
+        "$(eval $(call OfficialStage))\n"
+        "define StageInstall\n"
+        "install-stage: official-stage\n"
+        "$(call Package/$(PKG_NAME)/install,$(TOPDIR)/stage)\n"
+        "endef\n"
+        "$(eval $(StageInstall))\n",
+        encoding="utf-8",
+    )
+    run = subprocess.run(
+        ["make", "-f", validation.name, "install-stage", f"TOPDIR={topdir}", "DUMP=1"],
+        cwd=package, check=True, capture_output=True, text=True, timeout=30,
+    )
+    assert "smart-upgrade-agent.sh" in run.stdout
+    stage = topdir / "stage"
+    expected = {
+        "usr/libexec/smart-upgrade/smart-upgrade-agent": 0o755,
+        "usr/libexec/smart-upgrade/smart-upgrade-storage.sh": 0o755,
+        "usr/libexec/rpcd/smart_upgrade": 0o755,
+        "usr/share/rpcd/acl.d/luci-app-smart-upgrade.json": 0o644,
+        "usr/share/luci/menu.d/luci-app-smart-upgrade.json": 0o644,
+        "www/luci-static/resources/view/smart-upgrade/overview.js": 0o644,
+        "www/luci-static/resources/smart-upgrade/model.js": 0o644,
+    }
+    for name, mode in expected.items():
+        path = stage / name
+        assert path.is_file(), name
+        assert path.stat().st_mode & 0o777 == mode

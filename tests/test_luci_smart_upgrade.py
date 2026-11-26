@@ -300,7 +300,7 @@ def rpc_harness(tmp_path):
         SMART_UPGRADE_BOOT_ID_FILE=str(boot_id),
         SMART_UPGRADE_PROC_ROOT=str(proc_root),
         SMART_UPGRADE_SELF_START_TICKS="12345",
-        SMART_UPGRADE_SETSID=os.environ.get("T15_SETSID", str(setsid)),
+        SMART_UPGRADE_SETSID=os.environ.get("T15_SETSID", shutil.which("setsid") or str(setsid)),
         SMART_UPGRADE_FLOCK=os.environ.get("T15_FLOCK", str(flock)),
     )
 

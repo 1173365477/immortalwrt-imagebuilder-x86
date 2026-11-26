@@ -72,7 +72,14 @@ never returned to LuCI.
 The lock owner record binds PID, Linux process start ticks and boot ID. A live
 owner returns `SCAN_BUSY`. A provably exited/reused PID or old boot is atomically
 isolated and returns `LOCK_RECOVERED`; the recovery request never starts a scan.
-Damaged or unverifiable ownership fails closed.
+Damaged or unverifiable ownership returns `LOCK_UNVERIFIABLE`. For a legacy
+`scan.acquire` without valid owner evidence, a local administrator should
+quiesce new scans, independently confirm that the scanner and its descendants
+have stopped, and preserve the directory for investigation before retrying.
+The provider serializes acquisition and recovery with kernel `flock` on a
+stable private inode. The kernel releases the lock when its last descriptor
+closes. The scan lock directory and complete owner record are published together
+by rename.
 
 `generate-migration-plan.py` performs the complete existing Snapshot and Plan
 JSON Schema validation and verifies the Plan canonical digest before generating
@@ -89,6 +96,17 @@ returning data. Any missing, mixed, stale or changed byte makes Plan and Report
 unavailable; target, compatibility and build permission are not returned.
 Report export creates a browser-side Markdown Blob from a matched response and
 performs no router write.
+
+The privileged publisher and its private directories form the trust boundary.
+The publisher verifies existing generations before reusing them and refuses
+unsafe directories or files. The Snapshot evidence ID identifies the scanner's
+evidence, and its separate byte hash binds the analysis to the exact current
+Snapshot bytes. The Plan canonical digest binds its normalized JSON content.
+The producer name and Git commit are provenance labels supplied by the trusted
+execution environment. The commit can come from `SMART_UPGRADE_PRODUCER_COMMIT`.
+Hashes and commit labels provide neither a digital signature nor proof that an
+arbitrary bundle came from the trusted generator. A privileged operator must
+restrict publication to output from that generator.
 
 ## Evidence Bundle v1
 
