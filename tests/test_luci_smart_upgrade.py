@@ -291,7 +291,11 @@ def rpc_harness(tmp_path):
         )
         flock.chmod(0o755)
     env = os.environ.copy()
+    worker_shell = tmp_path / "worker-shell"
+    worker_shell.write_text(f'#!/bin/sh\nexec {shlex.join(RPC_SHELL)} "$@"\n')
+    worker_shell.chmod(0o700)
     env.update(
+        SMART_UPGRADE_WORKER_SHELL=str(worker_shell),
         SMART_UPGRADE_STATE_DIR=str(state),
         SMART_UPGRADE_AGENT=str(agent),
         SMART_UPGRADE_JSONFILTER=str(jsonfilter),
@@ -421,6 +425,11 @@ def test_report_binds_snapshot_and_exposes_server_blockers(rpc_harness):
     assert plan_envelope["flash_ready"] is False
     assert plan_envelope["plan"]["source_snapshot_id"] == URN
     assert plan_envelope["plan"]["decisions"][1]["target_package"] == "new-addon"
+    snapshot_envelope = invoke("snapshot")
+    generation = (state / "current-snapshot").read_text().split()[0]
+    assert all(envelope["snapshot_generation"] == generation
+               for envelope in (snapshot_envelope, plan_envelope, report))
+    assert node_model("bindEvidence", snapshot_envelope, plan_envelope, report)["report"] == report
 
 
 def test_report_snapshot_mismatch_is_not_silently_trusted(rpc_harness):
@@ -858,6 +867,59 @@ def test_term_during_scan_kills_children_and_releases_lock(rpc_harness):
     assert not (state / "scan.lock").exists()
 
 
+def test_rpcd_early_timeout_keeps_worker_exclusive_and_cleans_children(rpc_harness):
+    state, _, _, agent, env, invoke = rpc_harness
+    child = state.parent / "orphan-check"
+    agent.write_text(
+        '#!/bin/sh\nsleep 90 &\nprintf "%s\\n" "$!" > "$SCAN_CHILD"\nwait\n'
+    )
+    agent.chmod(0o755)
+    env.update(SCAN_CHILD=str(child), SMART_UPGRADE_SCAN_TIMEOUT="14")
+    if sys.platform.startswith("linux"):
+        env["SMART_UPGRADE_PROC_ROOT"] = "/proc"
+        env.pop("SMART_UPGRADE_SELF_START_TICKS")
+    request = subprocess.Popen(
+        [*RPC_SHELL, str(RPC), "call", "scan"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+    )
+    try:
+        assert request.stdin
+        request.stdin.close()
+        deadline = time.monotonic() + 12
+        while (not child.exists() or not child.stat().st_size) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        child_pid = int(child.read_text())
+        lock = state / "scan.lock"
+        owner = json.loads((lock / "owner.json").read_text())
+        assert int(owner["pid"]) != request.pid
+        if not sys.platform.startswith("linux"):
+            write_proc_stat(Path(env["SMART_UPGRADE_PROC_ROOT"]), owner["pid"], owner["process_start_ticks"])
+
+        # rpcd kills only its immediate provider and closes the RPC pipes.
+        request.kill()
+        request.wait(timeout=5)
+        assert request.stdout and request.stderr
+        request.stdout.close()
+        request.stderr.close()
+        assert not process_stopped(child_pid)
+        assert invoke("scan")["error_code"] == "SCAN_BUSY"
+        assert json.loads((lock / "owner.json").read_text()) == owner
+
+        deadline = time.monotonic() + 24
+        while lock.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not lock.exists()
+        assert process_stopped(child_pid)
+        payload = invoke("status")
+        assert payload["error_code"] == "SCAN_TIMEOUT"
+        assert payload["dispatch_allowed"] is payload["flash_ready"] is False
+        assert not list(state.glob(".scan-reply.*"))
+    finally:
+        if request.poll() is None:
+            request.terminate()
+            request.wait(timeout=10)
+
+
 def test_rpc_rejects_any_changed_published_evidence_bytes(rpc_harness):
     state, _, _, _, _, invoke = rpc_harness
     invoke("scan")
@@ -966,7 +1028,8 @@ def test_storage_special_mount_and_partial_docker_remain_visible():
 
 
 def test_target_version_requires_snapshot_matched_report():
-    report = {"available": True, "integrity_status": "mismatch", "target_version": "29.0.1"}
+    report = {"available": True, "integrity_status": "mismatch", "target_version": "29.0.1",
+              "snapshot_id": snapshot()["snapshot_id"]}
     assert node_model("overview", snapshot(), report)["target_version"] == "Unknown"
     report["integrity_status"] = "matched"
     assert node_model("overview", snapshot(), report)["target_version"] == "29.0.1"
@@ -977,12 +1040,44 @@ def test_matched_report_supplies_target_identity_without_browser_inference():
         "available": True, "integrity_status": "matched", "target_version": "29.0.1",
         "target": "x86/64", "profile": "generic", "architecture": "x86_64",
         "package_manager": "apk",
+        "snapshot_id": snapshot()["snapshot_id"],
     }
     value = node_model("overview", snapshot(manager="opkg"), report)
     assert value["current_package_manager"] == "OPKG"
     assert value["target_package_manager"] == "APK"
     assert value["target_target"] == "x86/64"
     assert value["target_profile"] == "generic"
+
+
+def test_page_evidence_requires_one_exact_snapshot_generation():
+    value = snapshot()
+    decision = plan()
+    generation = "a" * 64 + "-1000-1"
+    scan = {"available": True, "integrity_status": "verified",
+            "snapshot_generation": generation, "snapshot": value}
+    analysis = {"available": True, "integrity_status": "matched",
+                "snapshot_generation": generation, "plan": decision}
+    report = {"available": True, "integrity_status": "matched",
+              "snapshot_generation": generation, "plan_id": decision["plan_id"],
+              "snapshot_id": value["snapshot_id"], "current_snapshot_id": value["snapshot_id"],
+              "target_version": "29.0.1", "compatibility": "compatible", "build_allowed": True}
+    accepted = node_model("bindEvidence", scan, analysis, report)
+    assert accepted["plan"] == decision and accepted["report"] == report
+    changed_generation = "a" * 64 + "-1000-2"
+    for inputs in [
+        ({}, analysis, report),
+        (scan, {}, report),
+        (scan, analysis, {}),
+        (scan, {**analysis, "snapshot_generation": changed_generation}, report),
+        (scan, analysis, {**report, "snapshot_generation": changed_generation}),
+        (scan, analysis, {**report, "snapshot_generation": None}),
+        (scan, analysis, {**report, "plan_id": "different"}),
+        (scan, analysis, {**report, "snapshot_id": "different"}),
+    ]:
+        rejected = node_model("bindEvidence", *inputs)
+        assert rejected["plan"] is None
+        assert rejected["report"] == {"available": False}
+        assert node_model("overview", rejected["snapshot"], rejected["report"])["target_version"] == "Unknown"
 
 
 def test_model_displays_server_package_decisions_without_reclassifying():

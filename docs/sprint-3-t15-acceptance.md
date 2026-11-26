@@ -88,6 +88,12 @@ and setsid from the checksum-pinned Alpine rootfs on Linux. Full target SDK
 packaging and actual OpenWrt rpcd/ubus runtime remain unverified. The current
 PR checks are available on [PR #26](https://github.com/1173365477/immortalwrt-imagebuilder-x86/pull/26/checks).
 
+The timeout regression simulates rpcd killing only its provider PID and
+closing the RPC pipes. It verifies that the scan worker retains exclusivity
+and cleans up its children. The LuCI model regression verifies that mixed
+Snapshot, Plan, and Report generations are unavailable, including two
+different generations with the same Snapshot ID.
+
 - No affirmative Legacy BIOS evidence: Issue #7 remains open.
 - No live router/browser screenshot is produced in this sprint; source-level DOM,
   responsive CSS and executable model/RPC tests are the reviewable UI evidence.

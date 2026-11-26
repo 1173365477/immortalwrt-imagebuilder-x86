@@ -57,9 +57,28 @@ function packageRows(snapshot, plan) {
 	});
 }
 
+function bindEvidence(snapshotEnvelope, planEnvelope, report) {
+	var snapshot = snapshotEnvelope.available === true &&
+		snapshotEnvelope.integrity_status === 'verified' ? snapshotEnvelope.snapshot : null;
+	var generation = snapshotEnvelope.snapshot_generation;
+	var plan = planEnvelope.plan;
+	var matched = snapshot && typeof snapshot.snapshot_id === 'string' &&
+		typeof generation === 'string' && /^[a-f0-9]{64}-[0-9]+-[0-9]+$/.test(generation) &&
+		planEnvelope.available === true && planEnvelope.integrity_status === 'matched' &&
+		planEnvelope.snapshot_generation === generation &&
+		plan && plan.schema_version === '1.0.0' && plan.source_snapshot_id === snapshot.snapshot_id &&
+		typeof plan.plan_id === 'string' && report.available === true &&
+		report.integrity_status === 'matched' && report.snapshot_generation === generation &&
+		report.snapshot_id === snapshot.snapshot_id && report.current_snapshot_id === snapshot.snapshot_id &&
+		report.plan_id === plan.plan_id;
+	return { snapshot: snapshot, plan: matched ? plan : null, report: matched ? report : { available: false } };
+}
+
 function overview(snapshot, report) {
 	var system = snapshot && snapshot.system || {};
-	var trustedTarget = report && report.available === true && report.integrity_status === 'matched';
+	var trustedTarget = snapshot && typeof snapshot.snapshot_id === 'string' &&
+		report && report.available === true && report.integrity_status === 'matched' &&
+		report.snapshot_id === snapshot.snapshot_id;
 	return {
 		distribution: display(system.distribution),
 		current_version: display(system.version),
@@ -124,6 +143,7 @@ function formatBytes(value) {
 
 return {
 	display: display,
+	bindEvidence: bindEvidence,
 	overview: overview,
 	packages: packageRows,
 	decisions: decisionRows,

@@ -292,18 +292,21 @@ return view.extend({
 		var snapshotEnvelope = data[1] || rpcFallback();
 		var planEnvelope = data[2] || rpcFallback();
 		var report = data[3] || rpcFallback();
-		var snapshot = snapshotEnvelope.available ? snapshotEnvelope.snapshot : null;
-		var plan = planEnvelope.available === true && planEnvelope.plan &&
-			planEnvelope.plan.schema_version === '1.0.0' ? planEnvelope.plan : null;
+		var evidence = model.bindEvidence(snapshotEnvelope, planEnvelope, report);
+		var snapshot = evidence.snapshot;
+		var plan = evidence.plan;
+		if (evidence.report.available !== true)
+			evidence.report.error_message = report.available === true ?
+				_('Migration evidence does not match this scan. Refresh to try again.') : report.error_message;
 		var root = E('div', { 'class': 'smart-upgrade-page' }, [
 			E('h1', {}, _('Smart Upgrade')),
 			E('div', { 'class': 'alert-message warning' },
 				_('Read-only Sprint 3 view. Dispatch and flashing are disabled; build allowed never means flash ready.')),
-			this.renderOverview(snapshot, report),
+			this.renderOverview(snapshot, evidence.report),
 			this.renderScanner(status, snapshotEnvelope),
 			this.renderPackages(snapshot, plan),
 			this.renderServicesAndStorage(snapshot),
-			this.renderReport(report)
+			this.renderReport(evidence.report)
 		]);
 		var stateNode = root.querySelector('.smart-upgrade-section:nth-of-type(2) .smart-upgrade-badge');
 		poll.add(function() {

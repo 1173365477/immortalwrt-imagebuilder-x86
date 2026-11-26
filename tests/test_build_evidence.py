@@ -589,7 +589,7 @@ def _verify_t15_in_pinned_linux_runtime(tmp_path):
                T15_FLOCK=flock)
     command = [sys.executable, "-m", "pytest", "-q", "tests/test_luci_smart_upgrade.py"]
     subprocess.run(
-        [*command, "-k", "overall_timeout or term_during or supervisor_unavailable"],
+        [*command, "-k", "overall_timeout or term_during or supervisor_unavailable or rpcd_early_timeout"],
         cwd=ROOT, env=env, check=True, timeout=90,
     )
     concurrency = (

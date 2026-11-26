@@ -40,7 +40,7 @@ Object: `smart_upgrade`
 | Method | ACL | Client parameters | Result |
 |---|---|---|---|
 | `status` | read | none | `scan_status`, timestamps, Snapshot identity/status, stable error, and false safety flags |
-| `scan` | write | none | Runs only the fixed agent with `--privacy redacted`; returns the updated status |
+| `scan` | write | none | Starts a bounded worker for the fixed agent with `--privacy redacted`; returns its result if still connected |
 | `snapshot` | read | none | Validated scanner envelope containing the complete Snapshot |
 | `plan` | read | none | Matched Plan only after immutable Bundle seal, byte hashes, identities, binding and safety checks |
 | `report` | read | none | Matched Report only from the same verified Bundle; otherwise unavailable |
@@ -68,6 +68,16 @@ only an atomic pointer. The evidence identity is not redefined as a JSON file
 hash. A scan has a fixed 180-second deadline, is launched in an isolated process
 group, and TERM/timeout stops its descendants. Scanner stderr is private and is
 never returned to LuCI.
+
+The worker owns the scan lock and writes its reply to an unlinked private
+file. If rpcd times out and kills the request process, the worker retains the
+lock, updates `status`, and finishes or terminates its agent process group at
+the deadline. The request cannot retry the scan while that worker is active.
+
+The Snapshot, Plan, and Report RPC responses carry the same
+`snapshot_generation` for a verified scan. LuCI requires this generation,
+the Snapshot ID and the Plan ID to agree before showing analysis results.
+Missing or mixed responses leave the target Unknown and disable report export.
 
 The lock owner record binds PID, Linux process start ticks and boot ID. A live
 owner returns `SCAN_BUSY`. A provably exited/reused PID or old boot is atomically

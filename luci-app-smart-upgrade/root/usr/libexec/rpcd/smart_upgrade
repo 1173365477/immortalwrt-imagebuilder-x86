@@ -12,6 +12,7 @@ AGENT=${SMART_UPGRADE_AGENT:-/usr/libexec/smart-upgrade/smart-upgrade-agent}
 JSONFILTER=${SMART_UPGRADE_JSONFILTER:-jsonfilter}
 JSHN_LIBRARY=${SMART_UPGRADE_JSHN_LIBRARY:-/usr/share/libubox/jshn.sh}
 SETSID=${SMART_UPGRADE_SETSID:-setsid}
+WORKER_SHELL=${SMART_UPGRADE_WORKER_SHELL:-/bin/sh}
 EXPECTED_UID=${SMART_UPGRADE_EXPECTED_UID:-0}
 PROC_ROOT=${SMART_UPGRADE_PROC_ROOT:-/proc}
 BOOT_ID_FILE=${SMART_UPGRADE_BOOT_ID_FILE:-$PROC_ROOT/sys/kernel/random/boot_id}
@@ -36,7 +37,7 @@ list)
 	printf '%s\n' '{"status":{},"scan":{},"snapshot":{},"plan":{},"report":{}}'
 	exit 0
 	;;
-call) ;;
+call|scan-worker) ;;
 *) exit 1 ;;
 esac
 
@@ -415,6 +416,8 @@ run_scan() {
 	timeout_marker=$(mktemp "$STATE_DIR/.scan-timeout.XXXXXX")
 	ACTIVE_AGENT_GROUP=""
 	RUN_RESULT_FILE=""
+	# Invoked by the scan worker's EXIT trap.
+	# shellcheck disable=SC2317
 	cleanup_scan() {
 		if [ -n "$ACTIVE_AGENT_GROUP" ]; then
 			kill -TERM "-$ACTIVE_AGENT_GROUP" 2>/dev/null || true
@@ -459,6 +462,32 @@ run_scan() {
 	emit_status
 }
 
+request_scan() {
+	# rpcd may SIGKILL this request process before the scan deadline. The
+	# worker owns the scan lock and its output is independent of rpcd pipes.
+	if ! reply=$(mktemp "$STATE_DIR/.scan-reply.XXXXXX"); then
+		emit_error SCAN_RUNTIME_UNAVAILABLE "Cannot create a private scan reply"
+		return
+	fi
+	# Read the reply only after wait confirms the writer has finished.
+	# shellcheck disable=SC2094
+	{
+		if ! rm -f "$reply"; then
+			emit_error SCAN_RUNTIME_UNAVAILABLE "Cannot unlink the private scan reply"
+			return
+		fi
+		"$WORKER_SHELL" "$0" scan-worker </dev/null >&4 2>/dev/null 3<&- 4>&- &
+		scan_worker=$!
+		trap 'kill -TERM "$scan_worker" 2>/dev/null || true; wait "$scan_worker" 2>/dev/null || true; exit 143' HUP INT TERM
+		if wait "$scan_worker"; then
+			cat <&3
+		else
+			emit_error SCAN_RUNTIME_UNAVAILABLE "Scan worker exited unexpectedly"
+		fi
+		trap - HUP INT TERM
+	} 3<"$reply" 4>"$reply"
+}
+
 read_pointer() {
 	pointer=$1; pattern=$2
 	safe_regular_file "$pointer" 256 || return 1
@@ -494,7 +523,7 @@ load_snapshot_bundle() {
 
 emit_snapshot() {
 	if ! load_snapshot_bundle; then emit_error SNAPSHOT_UNVERIFIED "No byte-verified read-only system snapshot is available"; return; fi
-	printf '%s' '{"available":true,"integrity_status":"verified","dispatch_allowed":false,"flash_ready":false,"snapshot":'
+	printf '{"available":true,"integrity_status":"verified","dispatch_allowed":false,"flash_ready":false,"snapshot_generation":"%s","snapshot":' "${snapshot_pointer%% *}"
 	cat "$SNAPSHOT"
 	printf '%s\n' '}'
 }
@@ -569,7 +598,7 @@ load_analysis_bundle() {
 
 emit_plan() {
 	if ! load_analysis_bundle; then emit_error EVIDENCE_UNVERIFIED "No trusted Snapshot-bound Migration Plan bundle is available"; return; fi
-	printf '%s' '{"available":true,"integrity_status":"matched","dispatch_allowed":false,"flash_ready":false,"plan":'
+	printf '{"available":true,"integrity_status":"matched","dispatch_allowed":false,"flash_ready":false,"snapshot_generation":"%s","plan":' "${snapshot_pointer%% *}"
 	cat "$PLAN"
 	printf '%s\n' '}'
 }
@@ -592,6 +621,7 @@ emit_report() {
 	json_init
 	json_add_boolean available 1
 	json_add_string integrity_status matched
+	json_add_string snapshot_generation "${snapshot_pointer%% *}"
 	json_add_string current_snapshot_id "$snapshot_id"
 	json_add_string snapshot_id "$plan_snapshot_id"
 	json_add_string plan_id "$plan_id"
@@ -615,11 +645,16 @@ emit_report() {
 
 # rpcd supplies a JSON object on stdin. No method accepts a client-controlled
 # path, command, package, service, timeout, process identity, or evidence result.
+if [ "$1" = scan-worker ]; then
+	initialize_state || exit 0
+	run_scan
+	exit
+fi
 cat >/dev/null
 initialize_state || exit 0
 case "${2:-}" in
 	status) emit_status ;;
-	scan) run_scan ;;
+	scan) request_scan ;;
 	snapshot) emit_snapshot ;;
 	plan) emit_plan ;;
 	report) emit_report ;;
