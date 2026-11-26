@@ -80,8 +80,9 @@ authoritative scanner validation. No test was deleted, skipped, or weakened.
 
 ## Remaining limitations
 
-The follow-up verifies Prepare and Install using the pinned OpenWrt LuCI
-`openwrt-25.12` rules at `cb87fe60e1e2e052af36a93647f2264577829e0a` with a
+The follow-up verifies Prepare and Install using the LuCI feed pinned by
+[OpenWrt 25.12.2 x86/64](https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/feeds.buildinfo)
+at `067535eaf51a59582b775a8b588a9b05810f8030` with a
 minimal buildroot harness. CI exercises the process group with the BusyBox ash
 and setsid from the checksum-pinned Alpine rootfs on Linux. Full target SDK
 packaging and actual OpenWrt rpcd/ubus runtime remain unverified. The current

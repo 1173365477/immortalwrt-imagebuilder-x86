@@ -9,8 +9,8 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
 OFFICIAL_LUCI_MK = ROOT / "tests/fixtures/openwrt-luci-25.12-luci.mk"
-OFFICIAL_LUCI_COMMIT = "cb87fe60e1e2e052af36a93647f2264577829e0a"
-OFFICIAL_LUCI_MK_SHA256 = "9716c9a7a1c276b867df5887558e2b63b78f7d3695915adb7fcd0a7f0182ed0d"
+OFFICIAL_LUCI_COMMIT = "067535eaf51a59582b775a8b588a9b05810f8030"
+OFFICIAL_LUCI_MK_SHA256 = "503439cffea8d80904d411e703347c785b312838b0d5502f30f2b4358a9b94ed"
 
 
 def test_luci_prepare_callback_stages_complete_executable_package(tmp_path):
@@ -100,7 +100,7 @@ def test_luci_prepare_callback_stages_complete_executable_package(tmp_path):
 def test_pinned_official_luci_25_12_rules_execute_package_prepare(tmp_path):
     """Execute this package's callback through the pinned official LuCI rules.
 
-    The fixture is openwrt/luci openwrt-25.12 at OFFICIAL_LUCI_COMMIT. This
+    The fixture is the LuCI feed from OpenWrt 25.12.2 at OFFICIAL_LUCI_COMMIT. This
     validates the real LuCI Make contract, but is intentionally not represented
     as a complete target SDK build or an installable target IPK.
     """
