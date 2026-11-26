@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -19,7 +20,7 @@ COMMIT = "d" * 40
 
 def source_bundle(tmp_path, *, snapshot_value=None, plan_value=None, report="# Migration\nBlocked.\n"):
     source = tmp_path / "source"
-    source.mkdir()
+    source.mkdir(parents=True)
     snapshot_path = source / "snapshot-source.json"
     plan_path = source / "plan-source.json"
     report_path = source / "report-source.md"
@@ -113,6 +114,81 @@ def test_failed_publish_preserves_previous_generation_and_pointer(tmp_path, monk
         publish_bundle(bundle_dir, state, ROOT)
     assert (state / "current-analysis").read_text() == original_pointer
     assert (state / "analyses" / original).is_dir()
+
+
+def test_valid_existing_generation_is_fully_revalidated_and_reused(tmp_path):
+    bundle_dir = source_bundle(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    generation = publish_bundle(bundle_dir, state, ROOT)
+    before = (state / "current-analysis").read_bytes()
+    assert publish_bundle(bundle_dir, state, ROOT) == generation
+    assert (state / "current-analysis").read_bytes() == before
+    assert [path.name for path in (state / "analyses").iterdir()] == [generation]
+
+
+@pytest.mark.parametrize("mutation", [
+    "snapshot", "plan", "report", "manifest", "symlink", "missing", "extra",
+])
+def test_invalid_existing_generation_is_preserved_and_cannot_replace_pointer(tmp_path, mutation):
+    original_bundle = source_bundle(tmp_path / "original", report="# Original\n")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    original = publish_bundle(original_bundle, state, ROOT)
+    original_pointer = (state / "current-analysis").read_bytes()
+
+    candidate = source_bundle(tmp_path / "candidate", report="# Candidate\n")
+    manifest = json.loads((candidate / "luci-evidence-bundle-v1.json").read_text())
+    generation = manifest["digest"]
+    existing = state / "analyses" / generation
+    shutil.copytree(candidate, existing)
+    existing.chmod(0o700)
+    for path in existing.iterdir():
+        path.chmod(0o600)
+    names = {
+        "snapshot": "system-snapshot-v1.json", "plan": "migration-plan-v1.json",
+        "report": "migration-report.md", "manifest": "luci-evidence-bundle-v1.json",
+    }
+    if mutation in names:
+        path = existing / names[mutation]
+        path.write_bytes(path.read_bytes() + b" ")
+    elif mutation == "symlink":
+        path = existing / "migration-report.md"
+        path.unlink()
+        path.symlink_to(candidate / "migration-report.md")
+    elif mutation == "missing":
+        (existing / "migration-report.md").unlink()
+    elif mutation == "extra":
+        extra = existing / "unexpected"
+        extra.write_text("unknown", encoding="utf-8")
+        extra.chmod(0o600)
+
+    with pytest.raises(EvidenceBundleError):
+        publish_bundle(candidate, state, ROOT)
+    assert (state / "current-analysis").read_bytes() == original_pointer
+    assert (state / "analyses" / original).is_dir()
+    assert existing.exists(), "invalid evidence must be preserved for investigation"
+
+
+@pytest.mark.parametrize("boundary", ["state-symlink", "analyses-symlink", "unsafe-mode", "pointer-symlink"])
+def test_publisher_rejects_unsafe_filesystem_boundary_without_following_it(tmp_path, boundary):
+    bundle_dir = source_bundle(tmp_path / "source")
+    target = tmp_path / "external"
+    target.mkdir(mode=0o700)
+    state = tmp_path / "state"
+    if boundary == "state-symlink":
+        state.symlink_to(target, target_is_directory=True)
+    else:
+        state.mkdir(mode=0o700)
+        if boundary == "analyses-symlink":
+            (state / "analyses").symlink_to(target, target_is_directory=True)
+        elif boundary == "unsafe-mode":
+            state.chmod(0o777)
+        elif boundary == "pointer-symlink":
+            (state / "current-analysis").symlink_to(target / "pointer")
+    with pytest.raises(EvidenceBundleError):
+        publish_bundle(bundle_dir, state, ROOT)
+    assert not any(target.iterdir())
 
 
 def test_bundle_manifest_schema_is_registered_with_contract_suite(tmp_path):
