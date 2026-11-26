@@ -3,7 +3,7 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=LuCI read-only system scan and migration report viewer
-LUCI_DEPENDS:=+luci-base +rpcd +jsonfilter
+LUCI_DEPENDS:=+luci-base +rpcd +jsonfilter +flock
 LUCI_PKGARCH:=all
 
 PKG_MAINTAINER:=OpenWrt Smart Upgrade maintainers

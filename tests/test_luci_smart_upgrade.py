@@ -3,6 +3,7 @@ import hashlib
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -16,12 +17,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from luci_evidence import create_bundle, publish_bundle
 APP = ROOT / "luci-app-smart-upgrade"
 RPC = APP / "root/usr/libexec/rpcd/smart_upgrade"
+RPC_SHELL = shlex.split(os.environ.get("T15_RPC_SHELL", "sh"))
 MODEL = APP / "htdocs/luci-static/resources/smart-upgrade/model.js"
 VIEW = APP / "htdocs/luci-static/resources/view/smart-upgrade/overview.js"
 ACL = APP / "root/usr/share/rpcd/acl.d/luci-app-smart-upgrade.json"
 MENU = APP / "root/usr/share/luci/menu.d/luci-app-smart-upgrade.json"
 HEX = "a" * 64
 URN = f"urn:sha256:{HEX}"
+BOOT_ID = "12345678-1234-4234-9234-123456789abc"
 
 
 def snapshot(*, manager="opkg", boot="unknown", status="partial", packages=None):
@@ -202,7 +205,7 @@ open(path, 'w', encoding='utf-8').write(json.dumps(data, ensure_ascii=False))
     jshn = tmp_path / "jshn.sh"
     jshn.write_text(
         f"""JSHN_CONTEXT=
-JSHN_DATA={shlex.quote(str(jshn_data))}
+JSHN_DATA={shlex.quote(str(jshn_data))}.$$
 JSHN_HELPER={shlex.quote(str(helper))}
 json_init() {{ printf '%s' '{{}}' > "$JSHN_DATA"; JSHN_CONTEXT=; }}
 json_add_string() {{ "$JSHN_HELPER" "$JSHN_DATA" string "$JSHN_CONTEXT" "$1" "$2"; }}
@@ -219,7 +222,8 @@ json_dump() {{ cat "$JSHN_DATA"; }}
 import json, sys
 args = sys.argv[1:]
 path = args[args.index('-i') + 1]
-expr = args[args.index('-e') + 1]
+type_only = '-t' in args
+expr = args[args.index('-t' if type_only else '-e') + 1]
 try:
     value = json.load(open(path, encoding='utf-8'))
     parts = expr.removeprefix('@.').split('.')
@@ -230,7 +234,14 @@ try:
         value = value[part]
     values = value if expand else [value]
     for item in values:
-        if isinstance(item, bool):
+        if type_only:
+            if isinstance(item, bool): print('boolean')
+            elif isinstance(item, str): print('string')
+            elif isinstance(item, (int, float)): print('number')
+            elif isinstance(item, list): print('array')
+            elif isinstance(item, dict): print('object')
+            elif item is None: print('null')
+        elif isinstance(item, bool):
             print('true' if item else 'false')
         elif item is not None:
             print(item)
@@ -260,7 +271,7 @@ def rpc_harness(tmp_path):
     )
     agent.chmod(0o755)
     boot_id = tmp_path / "boot-id"
-    boot_id.write_text("test-boot-id\n", encoding="ascii")
+    boot_id.write_text(BOOT_ID + "\n", encoding="ascii")
     proc_root = tmp_path / "proc"
     proc_root.mkdir()
     setsid = tmp_path / "setsid"
@@ -269,6 +280,16 @@ def rpc_harness(tmp_path):
         encoding="utf-8",
     )
     setsid.chmod(0o755)
+    flock = shutil.which("flock")
+    if not flock:
+        flock = tmp_path / "flock"
+        flock.write_text(
+            "#!/usr/bin/env python3\nimport fcntl, sys\n"
+            "try: fcntl.flock(int(sys.argv[2]), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "except BlockingIOError: raise SystemExit(1)\n",
+            encoding="utf-8",
+        )
+        flock.chmod(0o755)
     env = os.environ.copy()
     env.update(
         SMART_UPGRADE_STATE_DIR=str(state),
@@ -279,12 +300,13 @@ def rpc_harness(tmp_path):
         SMART_UPGRADE_BOOT_ID_FILE=str(boot_id),
         SMART_UPGRADE_PROC_ROOT=str(proc_root),
         SMART_UPGRADE_SELF_START_TICKS="12345",
-        SMART_UPGRADE_SETSID=str(setsid),
+        SMART_UPGRADE_SETSID=os.environ.get("T15_SETSID", str(setsid)),
+        SMART_UPGRADE_FLOCK=os.environ.get("T15_FLOCK", str(flock)),
     )
 
     def invoke(method, payload="{}"):
         result = subprocess.run(
-            ["sh", str(RPC), "call", method], input=payload,
+            [*RPC_SHELL, str(RPC), "call", method], input=payload,
             capture_output=True, text=True, env=env, timeout=30,
         )
         assert result.returncode == 0, result.stderr
@@ -528,15 +550,28 @@ def test_status_symlink_and_oversize_are_rejected(rpc_harness):
     assert invoke("status")["error_code"] == "STATUS_UNSAFE"
 
 
-def write_lock(state, *, boot="test-boot-id", pid="123", ticks="999", valid=True):
+def owner_payload(*, boot=BOOT_ID, pid="123", ticks="999", created_at="2026-11-24T00:00:00Z"):
+    return {
+        "schema_version": "1.0.0", "pid": pid, "boot_id": boot,
+        "process_start_ticks": ticks, "created_at": created_at,
+    }
+
+
+def write_lock(state, *, boot=BOOT_ID, pid="123", ticks="999", valid=True, payload=None):
     lock = state / "scan.lock"
     lock.mkdir(mode=0o700)
     owner = lock / "owner.json"
-    owner.write_text(json.dumps({
-        "schema_version": "1.0.0", "pid": pid, "boot_id": boot,
-        "process_start_ticks": ticks, "created_at": "2026-11-24T00:00:00Z",
-    }) if valid else "broken", encoding="utf-8")
+    owner.write_text(json.dumps(payload or owner_payload(boot=boot, pid=pid, ticks=ticks)) if valid else "broken", encoding="utf-8")
     owner.chmod(0o600)
+
+
+def write_gate(state, *, boot=BOOT_ID, pid="123", ticks="999", valid=True, payload=None, owner=True):
+    gate = state / "scan.acquire"
+    gate.mkdir(mode=0o700)
+    if owner:
+        owner_path = gate / "owner.json"
+        owner_path.write_text(json.dumps(payload or owner_payload(boot=boot, pid=pid, ticks=ticks)) if valid else "broken", encoding="utf-8")
+        owner_path.chmod(0o600)
 
 
 def write_proc_stat(proc_root, pid="123", ticks="999"):
@@ -557,11 +592,20 @@ def test_live_scan_lock_remains_busy(rpc_harness):
     assert (state / "scan.lock").is_dir()
 
 
+def test_present_process_with_unreadable_identity_does_not_recover_lock(rpc_harness):
+    state, _, _, _, env, invoke = rpc_harness
+    invoke("status")
+    write_lock(state)
+    (Path(env["SMART_UPGRADE_PROC_ROOT"]) / "123").mkdir()
+    assert invoke("scan")["error_code"] == "LOCK_UNVERIFIABLE"
+    assert (state / "scan.lock").is_dir()
+
+
 @pytest.mark.parametrize("mode", ["missing-process", "pid-reuse", "new-boot"])
 def test_proven_stale_lock_is_isolated_and_requires_retry(rpc_harness, mode):
     state, _, _, _, env, invoke = rpc_harness
     invoke("status")
-    write_lock(state, boot="old-boot" if mode == "new-boot" else "test-boot-id")
+    write_lock(state, boot="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" if mode == "new-boot" else BOOT_ID)
     if mode == "pid-reuse":
         write_proc_stat(Path(env["SMART_UPGRADE_PROC_ROOT"]), ticks="1000")
     result = invoke("scan")
@@ -587,11 +631,151 @@ def test_corrupt_or_symlink_lock_is_not_removed(rpc_harness):
     assert target.is_dir()
 
 
+@pytest.mark.parametrize("mutation", [
+    "empty-pid", "empty-ticks", "empty-boot", "invalid-boot",
+    "missing-schema", "numeric-pid", "numeric-ticks", "missing-created-at",
+])
+def test_incomplete_or_wrong_type_lock_owner_is_unverifiable(rpc_harness, mutation):
+    state, _, _, _, _, invoke = rpc_harness
+    invoke("status")
+    payload = owner_payload()
+    if mutation == "empty-pid": payload["pid"] = ""
+    elif mutation == "empty-ticks": payload["process_start_ticks"] = ""
+    elif mutation == "empty-boot": payload["boot_id"] = ""
+    elif mutation == "invalid-boot": payload["boot_id"] = "not-a-linux-boot-id"
+    elif mutation == "missing-schema": payload.pop("schema_version")
+    elif mutation == "numeric-pid": payload["pid"] = 123
+    elif mutation == "numeric-ticks": payload["process_start_ticks"] = 999
+    elif mutation == "missing-created-at": payload.pop("created_at")
+    write_lock(state, payload=payload)
+    result = invoke("scan")
+    assert result["error_code"] == "LOCK_UNVERIFIABLE"
+    assert (state / "scan.lock").is_dir()
+
+
+def test_active_acquisition_gate_remains_busy(rpc_harness):
+    state, _, _, _, env, invoke = rpc_harness
+    invoke("status")
+    write_gate(state)
+    write_proc_stat(Path(env["SMART_UPGRADE_PROC_ROOT"]))
+    assert invoke("scan")["error_code"] == "SCAN_BUSY"
+    assert (state / "scan.acquire").is_dir()
+
+
+@pytest.mark.parametrize("mode", ["missing-process", "pid-reuse", "new-boot"])
+def test_proven_stale_acquisition_gate_is_isolated_without_scanning(rpc_harness, mode):
+    state, _, _, _, env, invoke = rpc_harness
+    invoke("status")
+    write_gate(state, boot="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" if mode == "new-boot" else BOOT_ID)
+    if mode == "pid-reuse":
+        write_proc_stat(Path(env["SMART_UPGRADE_PROC_ROOT"]), ticks="1000")
+    result = invoke("scan")
+    assert result["error_code"] == "LOCK_RECOVERED"
+    assert not (state / "scan.acquire").exists()
+    assert any(path.name.startswith("acquire-") for path in (state / "recovered-locks").iterdir())
+    assert not (state / "current-snapshot").exists()
+
+
+@pytest.mark.parametrize("owner_kind", ["missing", "corrupt"])
+def test_crash_window_acquisition_gate_is_unverifiable_not_deleted(rpc_harness, owner_kind):
+    state, _, _, _, _, invoke = rpc_harness
+    invoke("status")
+    write_gate(state, owner=owner_kind != "missing", valid=owner_kind != "corrupt")
+    result = invoke("scan")
+    assert result["error_code"] == "LOCK_UNVERIFIABLE"
+    assert (state / "scan.acquire").is_dir()
+
+
+def test_concurrent_acquisition_gate_recovery_is_atomic(rpc_harness):
+    state, _, _, _, _, invoke = rpc_harness
+    invoke("status")
+    write_gate(state)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: invoke("scan"), range(2)))
+    codes = {result.get("error_code", "") for result in results}
+    assert "LOCK_RECOVERED" in codes
+    assert codes <= {"LOCK_RECOVERED", "SCAN_BUSY", ""}
+    recovered = list((state / "recovered-locks").glob("acquire-*"))
+    assert len(recovered) == 1
+
+
+def test_acquisition_mutex_released_when_holder_is_killed(rpc_harness):
+    state, _, args_log, _, env, invoke = rpc_harness
+    ready = state.parent / "mutex-ready"
+    holder = subprocess.Popen(
+        [
+            "sh", "-c",
+            'umask 077; exec 9>>"$1"; "$2" -n 9 || exit 1; : >"$3"; kill -STOP "$$"',
+            "mutex-holder", str(state / "scan.acquire.mutex"),
+            env["SMART_UPGRADE_FLOCK"], str(ready),
+        ],
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists()
+        assert invoke("scan")["error_code"] == "SCAN_BUSY"
+        assert not args_log.exists()
+    finally:
+        holder.kill()
+        holder.wait(timeout=5)
+    assert invoke("scan")["scan_status"] == "partial"
+
+
+def test_two_simultaneous_scan_requests_never_run_two_agents(rpc_harness):
+    state, _, _, agent, env, _ = rpc_harness
+    counter = state.parent / "agent-counter"
+    release = state.parent / "agent-release"
+    agent.write_text(
+        "#!/bin/sh\nprintf 'run\\n' >> \"$AGENT_COUNTER\"\n"
+        "while [ ! -f \"$AGENT_RELEASE\" ]; do sleep 1; done\ncat \"$SNAPSHOT_FILE\"\n",
+        encoding="utf-8",
+    )
+    agent.chmod(0o755)
+    env["AGENT_COUNTER"] = str(counter)
+    env["AGENT_RELEASE"] = str(release)
+    env["SNAPSHOT_FILE"] = str(state.parent / "agent-snapshot.json")
+
+    first = subprocess.Popen(
+        [*RPC_SHELL, str(RPC), "call", "scan"], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    assert first.stdin
+    first.stdin.write("{}")
+    first.stdin.close()
+    owner_path = state / "scan.lock/owner.json"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not owner_path.exists():
+        time.sleep(0.02)
+    assert owner_path.exists()
+    while time.monotonic() < deadline and (state / "scan.acquire").exists():
+        time.sleep(0.02)
+    assert not (state / "scan.acquire").exists()
+    owner = json.loads(owner_path.read_text())
+    write_proc_stat(Path(env["SMART_UPGRADE_PROC_ROOT"]), owner["pid"], owner["process_start_ticks"])
+    second = subprocess.run(
+        ["sh", str(RPC), "call", "scan"], input="{}", capture_output=True,
+        text=True, env=env, timeout=30,
+    )
+    release.write_text("continue\n", encoding="ascii")
+    first.wait(timeout=15)
+    assert first.stdout and first.stderr
+    first_stdout = first.stdout.read()
+    first_stderr = first.stderr.read()
+    assert first.returncode == 0, first_stderr
+    assert second.returncode == 0, second.stderr
+    payloads = [json.loads(first_stdout), json.loads(second.stdout)]
+    assert sum(payload.get("error_code") == "SCAN_BUSY" for payload in payloads) == 1, payloads
+    assert counter.read_text().splitlines() == ["run"]
+
+
 def test_overall_timeout_kills_process_group_and_releases_lock(rpc_harness):
     state, _, _, agent, env, invoke = rpc_harness
     child_pid = state.parent / "child-pid"
     agent.write_text(
-        "#!/bin/sh\nsleep 20 &\nprintf '%s\\n' \"$!\" > \"$CHILD_PID\"\nwait\n",
+        "#!/bin/sh\n(trap '' TERM; sleep 20 & printf '%s\\n' \"$!\" > \"$CHILD_PID.grandchild\"; wait) &\n"
+        "printf '%s\\n' \"$!\" > \"$CHILD_PID\"\nwait\n",
         encoding="utf-8",
     )
     agent.chmod(0o755)
@@ -604,8 +788,41 @@ def test_overall_timeout_kills_process_group_and_releases_lock(rpc_harness):
     assert result["flash_ready"] is False
     assert not (state / "scan.lock").exists()
     pid = int(child_pid.read_text().strip())
-    with pytest.raises(ProcessLookupError):
+    assert_process_stopped(pid)
+    assert_process_stopped(int(child_pid.with_suffix(".grandchild").read_text()))
+
+
+def process_stopped(pid):
+    try:
         os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    # Linux can retain an orphan as a zombie until PID 1 reaps it.
+    stat = Path(f"/proc/{pid}/stat")
+    if sys.platform.startswith("linux"):
+        try:
+            return stat.read_text().rsplit(") ", 1)[1].startswith("Z ")
+        except FileNotFoundError:
+            return True
+    return False
+
+
+def assert_process_stopped(pid):
+    assert process_stopped(pid), f"scanner descendant {pid} is still running"
+
+
+@pytest.mark.parametrize("runtime", ["missing", "failed"])
+def test_supervisor_unavailable_releases_lock_and_allows_retry(rpc_harness, runtime):
+    state, _, args_log, _, env, invoke = rpc_harness
+    normal = env["SMART_UPGRADE_SETSID"]
+    env["SMART_UPGRADE_SETSID"] = (
+        str(state.parent / "missing-setsid") if runtime == "missing" else "/usr/bin/false"
+    )
+    assert invoke("scan")["error_code"] == "SCAN_RUNTIME_UNAVAILABLE"
+    assert not args_log.exists()
+    assert not (state / "scan.lock").exists()
+    env["SMART_UPGRADE_SETSID"] = normal
+    assert invoke("scan")["scan_status"] == "partial"
 
 
 def test_term_during_scan_kills_children_and_releases_lock(rpc_harness):
@@ -618,7 +835,7 @@ def test_term_during_scan_kills_children_and_releases_lock(rpc_harness):
     agent.chmod(0o755)
     env["CHILD_PID"] = str(child_pid)
     process = subprocess.Popen(
-        ["sh", str(RPC), "call", "scan"], stdin=subprocess.PIPE,
+        [*RPC_SHELL, str(RPC), "call", "scan"], stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
     )
     assert process.stdin
@@ -633,9 +850,7 @@ def test_term_during_scan_kills_children_and_releases_lock(rpc_harness):
     process.wait(timeout=10)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if process_stopped(pid):
             break
         time.sleep(0.05)
     else:
@@ -679,6 +894,24 @@ def test_rpc_rejects_changed_snapshot_bytes(rpc_harness):
     external.chmod(0o600)
     path.symlink_to(external)
     assert invoke("snapshot")["error_code"] == "SNAPSHOT_UNVERIFIED"
+
+
+def test_analysis_with_same_snapshot_id_but_different_bytes_is_unavailable(rpc_harness):
+    state, _, _, _, _, invoke = rpc_harness
+    assert invoke("scan")["scan_status"] == "partial"
+    source = state.parent / "alternate-snapshot.json"
+    source.write_bytes(published_snapshot(state).read_bytes() + b"\n")
+    plan_path = state.parent / "alternate-plan.json"
+    plan_path.write_text(json.dumps(plan()))
+    report = state.parent / "alternate-report.md"
+    report.write_text("# Alternate report\n")
+    bundle = state.parent / "alternate-bundle"
+    create_bundle(source, plan_path, report, bundle, ROOT, producer_commit="d" * 40)
+    publish_bundle(bundle, state, ROOT)
+    for method in ("plan", "report"):
+        result = invoke(method)
+        assert result["error_code"] == "EVIDENCE_UNVERIFIED"
+        assert "target_version" not in result and "build_allowed" not in result
 
 
 @pytest.mark.parametrize("manager", ["opkg", "apk"])

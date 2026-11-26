@@ -20,6 +20,8 @@ SCAN_TIMEOUT=${SMART_UPGRADE_SCAN_TIMEOUT:-180}
 STATE=$STATE_DIR/scan-state.json
 LOCK=$STATE_DIR/scan.lock
 ACQUIRE_GATE=$STATE_DIR/scan.acquire
+ACQUIRE_MUTEX=$STATE_DIR/scan.acquire.mutex
+FLOCK=${SMART_UPGRADE_FLOCK:-flock}
 SNAPSHOT_ROOT=$STATE_DIR/snapshots
 ANALYSIS_ROOT=$STATE_DIR/analyses
 CURRENT_SNAPSHOT=$STATE_DIR/current-snapshot
@@ -49,6 +51,7 @@ file_sha256() { sha256sum "$1" | awk '{print $1}'; }
 stat_uid() { stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1" 2>/dev/null; }
 stat_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
 json_value() { "$JSONFILTER" -i "$1" -e "$2" 2>/dev/null || true; }
+json_type() { "$JSONFILTER" -i "$1" -t "$2" 2>/dev/null || true; }
 
 emit_error() {
 	json_init
@@ -179,7 +182,7 @@ emit_status() {
 read_boot_id() {
 	[ -f "$BOOT_ID_FILE" ] && [ ! -L "$BOOT_ID_FILE" ] || return 1
 	IFS= read -r boot_id < "$BOOT_ID_FILE" || return 1
-	case "$boot_id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+	printf '%s\n' "$boot_id" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || return 1
 	printf '%s\n' "$boot_id"
 }
 
@@ -195,8 +198,9 @@ process_start_ticks() {
 	sed 's/^.*) //' "$stat_file" | awk '{print $20}' | grep -E '^[0-9]+$'
 }
 
-write_lock_owner() {
-	owner_tmp=$(mktemp "$LOCK/.owner.XXXXXX")
+write_owner() {
+	owner_directory=$1
+	owner_tmp=$(mktemp "$owner_directory/.owner.XXXXXX")
 	boot_id=$(read_boot_id) || return 1
 	start_ticks=$(process_start_ticks "$$") || return 1
 	json_init
@@ -206,7 +210,25 @@ write_lock_owner() {
 	json_add_string process_start_ticks "$start_ticks"
 	json_add_string created_at "$(timestamp)"
 	json_dump > "$owner_tmp"
-	mv -f "$owner_tmp" "$LOCK/owner.json"
+	mv -f "$owner_tmp" "$owner_directory/owner.json"
+}
+
+valid_owner_fields() {
+	owner=$1
+	[ "$(json_type "$owner" '@.schema_version')" = string ] || return 1
+	[ "$(json_type "$owner" '@.pid')" = string ] || return 1
+	[ "$(json_type "$owner" '@.boot_id')" = string ] || return 1
+	[ "$(json_type "$owner" '@.process_start_ticks')" = string ] || return 1
+	[ "$(json_type "$owner" '@.created_at')" = string ] || return 1
+	[ "$(json_value "$owner" '@.schema_version')" = 1.0.0 ] || return 1
+	owner_pid=$(json_value "$owner" '@.pid')
+	owner_boot=$(json_value "$owner" '@.boot_id')
+	owner_ticks=$(json_value "$owner" '@.process_start_ticks')
+	owner_created=$(json_value "$owner" '@.created_at')
+	case "$owner_pid" in ''|*[!0-9]*) return 1 ;; esac
+	case "$owner_ticks" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s\n' "$owner_boot" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || return 1
+	[ -n "$owner_created" ] && valid_time_or_empty "$owner_created" || return 1
 }
 
 recover_stale_lock() {
@@ -224,41 +246,74 @@ inspect_existing_lock() {
 	if ! safe_private_directory "$LOCK"; then emit_error LOCK_UNVERIFIABLE "Scan lock is not a trusted private directory"; return 1; fi
 	owner=$LOCK/owner.json
 	if ! safe_regular_file "$owner" 8192; then emit_error LOCK_UNVERIFIABLE "Scan lock owner evidence is missing or unsafe"; return 1; fi
-	[ "$(json_value "$owner" '@.schema_version')" = 1.0.0 ] || { emit_error LOCK_UNVERIFIABLE "Scan lock owner schema is invalid"; return 1; }
-	owner_pid=$(json_value "$owner" '@.pid')
-	owner_boot=$(json_value "$owner" '@.boot_id')
-	owner_ticks=$(json_value "$owner" '@.process_start_ticks')
-	case "$owner_pid:$owner_ticks" in *[!0-9:]*) emit_error LOCK_UNVERIFIABLE "Scan lock process identity is invalid"; return 1 ;; esac
+	valid_owner_fields "$owner" || { emit_error LOCK_UNVERIFIABLE "Scan lock owner identity is incomplete or invalid"; return 1; }
+	inspect_owner_identity recover_stale_lock
+}
+
+recover_stale_gate() {
+	ensure_private_directory "$STATE_DIR/recovered-locks" || { emit_error LOCK_UNVERIFIABLE "Recovered-lock audit directory is unsafe"; return 1; }
+	destination=$STATE_DIR/recovered-locks/acquire-$(epoch)-$$
+	if mv "$ACQUIRE_GATE" "$destination" 2>/dev/null; then
+		emit_error LOCK_RECOVERED "A proven stale acquisition gate was isolated; retry explicitly to start a scan"
+	else
+		emit_error LOCK_UNVERIFIABLE "Unable to archive acquisition evidence"
+	fi
+	return 1
+}
+
+inspect_existing_gate() {
+	if ! safe_private_directory "$ACQUIRE_GATE"; then emit_error LOCK_UNVERIFIABLE "Scan acquisition gate is not a trusted private directory"; return 1; fi
+	owner=$ACQUIRE_GATE/owner.json
+	if ! safe_regular_file "$owner" 8192; then emit_error LOCK_UNVERIFIABLE "Scan acquisition owner evidence is missing or unsafe"; return 1; fi
+	valid_owner_fields "$owner" || { emit_error LOCK_UNVERIFIABLE "Scan acquisition owner identity is incomplete or invalid"; return 1; }
+	inspect_owner_identity recover_stale_gate
+}
+
+inspect_owner_identity() {
 	current_boot=$(read_boot_id) || { emit_error LOCK_UNVERIFIABLE "Current boot identity is unavailable"; return 1; }
-	if [ "$owner_boot" != "$current_boot" ]; then recover_stale_lock; return; fi
-	current_ticks=$(process_start_ticks "$owner_pid" 2>/dev/null || true)
-	if [ -z "$current_ticks" ] || [ "$current_ticks" != "$owner_ticks" ]; then recover_stale_lock; return; fi
-	emit_error SCAN_BUSY "A read-only scan is already running"
+	if [ "$owner_boot" != "$current_boot" ]; then "$1"; return; fi
+	if current_ticks=$(process_start_ticks "$owner_pid"); then
+		if [ "$current_ticks" != "$owner_ticks" ]; then "$1"; return; fi
+	elif [ -d "$PROC_ROOT" ] && [ -x "$PROC_ROOT" ] && [ ! -e "$PROC_ROOT/$owner_pid" ]; then
+		"$1"
+		return
+	else
+		emit_error LOCK_UNVERIFIABLE "Current process identity cannot be verified"
+		return 1
+	fi
+	emit_error SCAN_BUSY "A read-only scan or acquisition is in progress"
+	return 1
+}
+
+acquire_lock_serialized() {
+	if [ -e "$ACQUIRE_GATE" ] || [ -L "$ACQUIRE_GATE" ]; then inspect_existing_gate; return 1; fi
+	if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then inspect_existing_lock; return 1; fi
+	# Publish the owner and directory together.
+	if ! pending_lock=$(mktemp -d "$STATE_DIR/.scan-lock.XXXXXX"); then
+		emit_error LOCK_UNVERIFIABLE "Cannot stage scan ownership"
+		return 1
+	fi
+	if write_owner "$pending_lock" && mv "$pending_lock" "$LOCK"; then return 0; fi
+	rm -f "$pending_lock/owner.json" "$pending_lock"/.owner.*
+	rmdir "$pending_lock" 2>/dev/null || true
+	emit_error LOCK_UNVERIFIABLE "Cannot establish verifiable scan ownership"
 	return 1
 }
 
 acquire_lock() {
-	if ! mkdir "$ACQUIRE_GATE" 2>/dev/null; then
+	command -v "$FLOCK" >/dev/null 2>&1 || { emit_error LOCK_UNVERIFIABLE "Kernel scan acquisition lock is unavailable"; return 1; }
+	# Keep the inode stable. The kernel releases the lock with the descriptor.
+	if [ -e "$ACQUIRE_MUTEX" ] || [ -L "$ACQUIRE_MUTEX" ]; then
+		safe_regular_file "$ACQUIRE_MUTEX" 0 || { emit_error LOCK_UNVERIFIABLE "Scan acquisition mutex is unsafe"; return 1; }
+	fi
+	exec 9>>"$ACQUIRE_MUTEX"
+	if "$FLOCK" -n 9; then
+		if acquire_lock_serialized; then result=0; else result=$?; fi
+	else
 		emit_error SCAN_BUSY "Another request is acquiring or recovering the scan lock"
-		return 1
+		result=1
 	fi
-	if ! safe_private_directory "$ACQUIRE_GATE"; then
-		emit_error LOCK_UNVERIFIABLE "Scan lock acquisition gate is unsafe"
-		return 1
-	fi
-	if mkdir "$LOCK" 2>/dev/null; then
-		if ! safe_private_directory "$LOCK" || ! write_lock_owner; then
-			rm -f "$LOCK/owner.json" "$LOCK"/.owner.* 2>/dev/null || true
-			rmdir "$LOCK" 2>/dev/null || true
-			rmdir "$ACQUIRE_GATE" 2>/dev/null || true
-			emit_error LOCK_UNVERIFIABLE "Cannot establish verifiable scan ownership"
-			return 1
-		fi
-		rmdir "$ACQUIRE_GATE" 2>/dev/null || true
-		return 0
-	fi
-	if inspect_existing_lock; then result=0; else result=$?; fi
-	rmdir "$ACQUIRE_GATE" 2>/dev/null || true
+	exec 9>&-
 	return "$result"
 }
 
@@ -318,6 +373,15 @@ run_agent_bounded() {
 	ACTIVE_AGENT_GROUP=$!
 	elapsed=0
 	while [ ! -s "$RUN_RESULT_FILE" ]; do
+		if ! kill -0 "$ACTIVE_AGENT_GROUP" 2>/dev/null; then
+			[ ! -s "$RUN_RESULT_FILE" ] || break
+			kill -KILL "-$ACTIVE_AGENT_GROUP" 2>/dev/null || true
+			wait "$ACTIVE_AGENT_GROUP" 2>/dev/null || true
+			ACTIVE_AGENT_GROUP=""
+			rm -f "$RUN_RESULT_FILE"
+			RUN_RESULT_FILE=""
+			return 125
+		fi
 		if [ "$elapsed" -ge "$SCAN_TIMEOUT" ]; then
 			printf '%s\n' timeout > "$marker"
 			kill -TERM "-$ACTIVE_AGENT_GROUP" 2>/dev/null || true
