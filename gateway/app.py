@@ -16,8 +16,11 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, Path as ApiPath, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .analysis import DEFAULT_ANALYSIS_TTL, AnalysisService
+from .targets import REF_PATTERN, strict_json
 from .database import DeviceIdentity, GatewayStore, TaskRecord
 from .errors import ErrorCode, GatewayError, PUBLIC_MESSAGES
 from .evidence import EvidenceVerifier, RejectingEvidenceVerifier
@@ -45,6 +48,11 @@ class GatewaySettings:
     external_timeout_seconds: float = 30.0
     sqlite_busy_timeout_ms: int = 1_000
     dispatch_enabled: bool = False
+    target_catalog_path: Path | None = None
+    analysis_enabled: bool = True
+    analysis_ttl_seconds: int = DEFAULT_ANALYSIS_TTL
+    analysis_workers: int = 2
+    analysis_timeout_seconds: float = 10.0
 
     @classmethod
     def from_env(cls) -> "GatewaySettings":
@@ -54,6 +62,10 @@ class GatewaySettings:
                 "GATEWAY_REPOSITORY", "1173365477/immortalwrt-imagebuilder-x86"
             ),
             require_https=os.environ.get("GATEWAY_ALLOW_HTTP", "false").lower() != "true",
+            target_catalog_path=Path(os.environ["GATEWAY_TARGET_CATALOG"])
+            if "GATEWAY_TARGET_CATALOG" in os.environ else None,
+            analysis_enabled=os.environ.get("GATEWAY_ANALYSIS_ENABLED", "true").lower() == "true",
+            analysis_ttl_seconds=int(os.environ.get("GATEWAY_ANALYSIS_TTL_SECONDS", DEFAULT_ANALYSIS_TTL)),
             dispatch_enabled=os.environ.get("GATEWAY_DISPATCH_ENABLED", "false").lower() == "true",
         )
 
@@ -165,6 +177,16 @@ def create_app(
     verifier = verifier or RejectingEvidenceVerifier()
     store = GatewayStore(settings.database_path, busy_timeout_ms=settings.sqlite_busy_timeout_ms)
     store.initialize()
+    if settings.analysis_timeout_seconds <= 0:
+        raise ValueError("invalid analysis execution deadline")
+    analysis = AnalysisService(
+        store, settings.target_catalog_path or store.path.parent / "target-catalog.json",
+        settings.analysis_ttl_seconds,
+    )
+    analysis_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=settings.analysis_workers, thread_name_prefix="gateway-analysis",
+    )
+    analysis_slots = asyncio.Semaphore(settings.analysis_workers)
     recovered = store.recover_incomplete_tasks()
     if recovered:
         audit("startup_recovery", status=TaskStatus.FAILED.value)
@@ -187,6 +209,7 @@ def create_app(
         finally:
             application.state.validation_executor.shutdown(wait=False, cancel_futures=True)
             application.state.external_executor.shutdown(wait=False, cancel_futures=True)
+            analysis_executor.shutdown(wait=False, cancel_futures=True)
 
     app = FastAPI(
         title="OpenWrt Smart Upgrade Build Gateway",
@@ -347,6 +370,70 @@ def create_app(
             limit=settings.rate_limit_requests,
             window_seconds=settings.rate_limit_window_seconds,
         )
+
+    async def run_analysis(function, *args):
+        if analysis_slots.locked():
+            raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
+        await analysis_slots.acquire()
+        loop = asyncio.get_running_loop()
+        try:
+            future = loop.run_in_executor(analysis_executor, function, *args)
+        except Exception:
+            analysis_slots.release()
+            raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503) from None
+
+        def release_slot(completed):
+            analysis_slots.release()
+            if not completed.cancelled():
+                completed.exception()
+
+        future.add_done_callback(release_slot)
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(future), timeout=settings.analysis_timeout_seconds,
+            )
+        except GatewayError:
+            raise
+        except Exception:
+            raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503) from None
+
+    def check_analysis_policy() -> None:
+        if not settings.analysis_enabled:
+            raise GatewayError(ErrorCode.ACCESS_DENIED, 403)
+
+    @app.get("/targets", responses={401: {}, 403: {}, 413: {}, 422: {}, 429: {}, 503: {}})
+    async def get_targets(request: Request, identity: DeviceIdentity = Depends(authenticate)):
+        await run_in_threadpool(apply_rate_limit, identity, "GET:/targets")
+        check_analysis_policy()
+        if request.url.query or await request.body():
+            raise GatewayError(ErrorCode.INVALID_REQUEST, 422)
+        result = await run_analysis(analysis.targets)
+        audit("targets_read", endpoint="GET:/targets", device=device_fingerprint(identity.device_id))
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+    @app.post("/analysis", responses={401: {}, 403: {}, 404: {}, 409: {}, 410: {},
+                                      413: {}, 422: {}, 429: {}, 503: {}})
+    async def post_analysis(request: Request, identity: DeviceIdentity = Depends(authenticate)):
+        await run_in_threadpool(apply_rate_limit, identity, "POST:/analysis")
+        check_analysis_policy()
+        media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
+        try:
+            if request.url.query or media_type != "application/json":
+                raise ValueError("invalid request envelope")
+            body = strict_json(await request.body())
+            if (not isinstance(body, dict) or set(body) != {"snapshot_ref", "target_ref"}
+                    or not all(isinstance(value, str) and REF_PATTERN.fullmatch(value)
+                               for value in body.values())):
+                raise ValueError("invalid evidence references")
+        except (ValueError, RecursionError):
+            raise GatewayError(ErrorCode.INVALID_REQUEST, 422) from None
+        result = await run_analysis(
+            analysis.analyze, identity, body["snapshot_ref"], body["target_ref"],
+            time.monotonic() + settings.analysis_timeout_seconds,
+        )
+        audit("analysis_completed", endpoint="POST:/analysis",
+              device=device_fingerprint(identity.device_id), status=result["status"])
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
     @app.post(
         "/builds",

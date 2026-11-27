@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import sqlite3
@@ -209,6 +210,14 @@ class GatewayStore:
                         UNIQUE(device_id, snapshot_sha256),
                         UNIQUE(device_id, scan_generation)
                     );
+                    CREATE TABLE IF NOT EXISTS analysis_receipts (
+                        analysis_id TEXT PRIMARY KEY,
+                        device_id TEXT NOT NULL,
+                        binding_json TEXT NOT NULL,
+                        expires_at INTEGER NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS analysis_receipts_expiry
+                        ON analysis_receipts(expires_at);
                     INSERT INTO gateway_meta(key, value) VALUES('schema_version', '3')
                         ON CONFLICT(key) DO NOTHING;
                     COMMIT;
@@ -354,6 +363,42 @@ class GatewayStore:
                 return connection.execute(
                     """UPDATE admitted_snapshots SET payload=NULL
                        WHERE expires_at<=? AND payload IS NOT NULL""", (int(time.time()),)
+                ).rowcount
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def record_analysis(self, identity: DeviceIdentity, binding: dict, expires_at: int,
+                        deadline: float) -> str:
+        analysis_id = secrets.token_hex(24)
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                now = int(time.time())
+                if time.monotonic() >= deadline:
+                    raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
+                if expires_at <= now:
+                    raise GatewayError(ErrorCode.ANALYSIS_EXPIRED, 410)
+                credential = connection.execute(
+                    """SELECT 1 FROM device_credentials WHERE credential_id=? AND device_id=?
+                       AND revoked_at IS NULL AND expires_at>?""",
+                    (identity.credential_id, identity.device_id, now),
+                ).fetchone()
+                if credential is None:
+                    raise GatewayError(ErrorCode.AUTH_INVALID, 401)
+                connection.execute(
+                    "INSERT INTO analysis_receipts VALUES (?, ?, ?, ?)",
+                    (analysis_id, identity.device_id, json.dumps(binding, separators=(",", ":")),
+                     expires_at),
+                )
+                return analysis_id
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def purge_expired_analysis(self) -> int:
+        try:
+            with self._connect() as connection:
+                return connection.execute(
+                    "DELETE FROM analysis_receipts WHERE expires_at<=?", (int(time.time()),)
                 ).rowcount
         except sqlite3.Error as exc:
             raise self._storage_error(exc) from exc
