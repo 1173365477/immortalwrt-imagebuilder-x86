@@ -15,8 +15,9 @@ from urllib.parse import urlparse
 
 
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+APK_COMPARISON_PATTERN = r"<=|>=|=|<|>"
 APK_DEPENDENCY_RE = re.compile(
-    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9_.+:-]*)(?:(?P<operator><=|>=|=|<|>)(?P<version>\S+))?$"
+    rf"^(?P<name>[A-Za-z0-9][A-Za-z0-9_.+:-]*)(?:(?P<operator>{APK_COMPARISON_PATTERN})(?P<version>\S+))?$"
 )
 PROTECTED_PACKAGES = {
     "apk", "opkg", "base-files", "busybox", "procd", "ubus", "uci",

@@ -10,14 +10,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from release_utils import (
-    ReleaseValidationError,
-    discover_feed_names,
-    discover_release,
-    get_url,
-    official_download_root,
-    parse_sha256sums,
-)
+if __package__:
+    from .release_utils import (
+        ReleaseValidationError,
+        discover_feed_names,
+        discover_release,
+        get_url,
+        official_download_root,
+        parse_sha256sums,
+    )
+else:
+    from release_utils import (
+        ReleaseValidationError,
+        discover_feed_names,
+        discover_release,
+        get_url,
+        official_download_root,
+        parse_sha256sums,
+    )
 
 
 @dataclass(frozen=True)

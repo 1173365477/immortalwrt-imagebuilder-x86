@@ -422,8 +422,6 @@ def test_database_insert_failure_is_rolled_back_through_http(tmp_path):
 def test_t14b_routes_are_not_exposed_as_fake_success(tmp_path):
     _, _, client, token, _ = gateway(tmp_path)
     for method, path in (
-        ("get", "/targets"),
-        ("post", "/analysis"),
         ("get", "/builds/request-001/artifacts"),
         ("get", "/builds/request-001/logs"),
     ):

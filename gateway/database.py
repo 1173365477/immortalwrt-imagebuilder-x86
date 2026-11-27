@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import sqlite3
@@ -196,6 +197,27 @@ class GatewayStore:
                         metadata_json TEXT NOT NULL,
                         verified_at INTEGER NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS admitted_snapshots (
+                        snapshot_ref TEXT PRIMARY KEY,
+                        device_id TEXT NOT NULL,
+                        snapshot_id TEXT NOT NULL,
+                        snapshot_sha256 TEXT NOT NULL,
+                        scan_generation TEXT NOT NULL,
+                        collected_at INTEGER NOT NULL,
+                        admitted_at INTEGER NOT NULL,
+                        expires_at INTEGER NOT NULL,
+                        payload BLOB,
+                        UNIQUE(device_id, snapshot_sha256),
+                        UNIQUE(device_id, scan_generation)
+                    );
+                    CREATE TABLE IF NOT EXISTS analysis_receipts (
+                        analysis_id TEXT PRIMARY KEY,
+                        device_id TEXT NOT NULL,
+                        binding_json TEXT NOT NULL,
+                        expires_at INTEGER NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS analysis_receipts_expiry
+                        ON analysis_receipts(expires_at);
                     INSERT INTO gateway_meta(key, value) VALUES('schema_version', '3')
                         ON CONFLICT(key) DO NOTHING;
                     COMMIT;
@@ -265,6 +287,146 @@ class GatewayStore:
         except ValueError as exc:
             raise GatewayError(ErrorCode.INTERNAL_ERROR, 500) from exc
         return f"gw-{value.hex}"
+
+    def admit_snapshot(self, raw: bytes, record: bytes, key: bytes, *, ttl: int) -> str:
+        from .admission import verify_collector_record
+
+        if ttl <= 0:
+            raise ValueError("invalid snapshot TTL")
+        claims = verify_collector_record(raw, record, key)
+        device_id = claims["device_id"]
+        sha = claims["snapshot_sha256"]
+        generation = claims["scan_generation"]
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                now = int(time.time())
+                enrolled = connection.execute(
+                    """SELECT 1 FROM device_credentials WHERE device_id=?
+                       AND revoked_at IS NULL AND expires_at>? LIMIT 1""", (device_id, now)
+                ).fetchone()
+                if enrolled is None:
+                    raise GatewayError(ErrorCode.ACCESS_DENIED, 403)
+                collected = claims["collected_at"]
+                existing = connection.execute(
+                    """SELECT snapshot_ref, snapshot_sha256, scan_generation, collected_at,
+                              expires_at, payload IS NOT NULL AS retained
+                       FROM admitted_snapshots WHERE device_id=?
+                         AND (snapshot_sha256=? OR scan_generation=?)""",
+                    (device_id, sha, generation),
+                ).fetchall()
+                if existing:
+                    row = existing[0]
+                    if (len(existing) != 1 or row["snapshot_sha256"] != sha
+                            or row["scan_generation"] != generation or row["collected_at"] != collected):
+                        raise GatewayError(ErrorCode.ANALYSIS_MISMATCH, 409)
+                    if not row["retained"] or now >= row["expires_at"]:
+                        raise GatewayError(ErrorCode.ANALYSIS_EXPIRED, 410)
+                    return row["snapshot_ref"]
+                expiry = collected + ttl
+                if collected > now:
+                    raise GatewayError(ErrorCode.ACCESS_DENIED, 403)
+                if now >= expiry:
+                    raise GatewayError(ErrorCode.ANALYSIS_EXPIRED, 410)
+                ref = secrets.token_hex(24)
+                connection.execute(
+                    """INSERT INTO admitted_snapshots
+                       (snapshot_ref, device_id, snapshot_id, snapshot_sha256, scan_generation,
+                        collected_at, admitted_at, expires_at, payload)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (ref, device_id, claims["snapshot_id"], sha, generation, collected,
+                     now, expiry, raw),
+                )
+                return ref
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def get_admitted_snapshot(self, device_id: str, ref: str) -> sqlite3.Row:
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT * FROM admitted_snapshots WHERE device_id=? AND snapshot_ref=?",
+                    (device_id, ref),
+                ).fetchone()
+                if row is None:
+                    raise GatewayError(ErrorCode.ANALYSIS_NOT_FOUND, 404)
+                if row["payload"] is None or row["expires_at"] <= int(time.time()):
+                    raise GatewayError(ErrorCode.ANALYSIS_EXPIRED, 410)
+                return row
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def purge_expired_snapshots(self) -> int:
+        """Clear expired payloads while keeping permanent per-device replay tombstones."""
+        try:
+            with self._connect() as connection:
+                return connection.execute(
+                    """UPDATE admitted_snapshots SET payload=NULL
+                       WHERE expires_at<=? AND payload IS NOT NULL""", (int(time.time()),)
+                ).rowcount
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def _limit_analysis_lock_wait(self, connection: sqlite3.Connection, deadline: float) -> int:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
+        busy_ms = min(self.busy_timeout_ms, int(remaining * 1000))
+        connection.execute(f"PRAGMA busy_timeout={busy_ms}")
+        return busy_ms
+
+    def _analysis_sqlite_error(
+        self, exc: sqlite3.Error, deadline: float, busy_ms: int,
+    ) -> GatewayError:
+        lock_error = (getattr(exc, "sqlite_errorcode", 0) & 0xff) in (
+            sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED,
+        )
+        if time.monotonic() >= deadline or (lock_error and busy_ms < self.busy_timeout_ms):
+            return GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
+        return self._storage_error(exc)
+
+    def record_analysis(self, identity: DeviceIdentity, binding: dict, expires_at: int,
+                        deadline: float) -> str:
+        analysis_id = secrets.token_hex(24)
+        serialized = json.dumps(binding, separators=(",", ":"))
+        busy_ms = self.busy_timeout_ms
+        try:
+            with self._connect() as connection:
+                busy_ms = self._limit_analysis_lock_wait(connection, deadline)
+                connection.execute("BEGIN IMMEDIATE")
+                now = int(time.time())
+                if time.monotonic() >= deadline:
+                    raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
+                if expires_at <= now:
+                    raise GatewayError(ErrorCode.ANALYSIS_EXPIRED, 410)
+                credential = connection.execute(
+                    """SELECT 1 FROM device_credentials WHERE credential_id=? AND device_id=?
+                       AND revoked_at IS NULL AND expires_at>?""",
+                    (identity.credential_id, identity.device_id, now),
+                ).fetchone()
+                if credential is None:
+                    raise GatewayError(ErrorCode.AUTH_INVALID, 401)
+                connection.execute(
+                    "INSERT INTO analysis_receipts VALUES (?, ?, ?, ?)",
+                    (analysis_id, identity.device_id, serialized, expires_at),
+                )
+                if time.monotonic() >= deadline:
+                    raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
+                if expires_at <= int(time.time()):
+                    raise GatewayError(ErrorCode.ANALYSIS_EXPIRED, 410)
+                connection.commit()
+                return analysis_id
+        except sqlite3.Error as exc:
+            raise self._analysis_sqlite_error(exc, deadline, busy_ms) from exc
+
+    def purge_expired_analysis(self) -> int:
+        try:
+            with self._connect() as connection:
+                return connection.execute(
+                    "DELETE FROM analysis_receipts WHERE expires_at<=?", (int(time.time()),)
+                ).rowcount
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
 
     def issue_credential(self, device_id: str, *, ttl_seconds: int, now: int | None = None) -> str:
         if not device_id or len(device_id) > 128 or ttl_seconds <= 0:
@@ -350,13 +512,19 @@ class GatewayStore:
         return DeviceIdentity(row["device_id"], row["credential_id"])
 
     def consume_rate_limit(
-        self, device_id: str, endpoint: str, *, limit: int, window_seconds: int, now: int | None = None
+        self, device_id: str, endpoint: str, *, limit: int, window_seconds: int,
+        now: int | None = None, deadline: float | None = None,
     ) -> None:
         timestamp = int(time.time() if now is None else now)
         window_start = timestamp - (timestamp % window_seconds)
+        busy_ms = self.busy_timeout_ms
         try:
             with self._connect() as connection:
+                if deadline is not None:
+                    busy_ms = self._limit_analysis_lock_wait(connection, deadline)
                 connection.execute("BEGIN IMMEDIATE")
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
                 connection.execute(
                     """INSERT INTO rate_limits(device_id, endpoint, window_start, count)
                        VALUES (?, ?, ?, 1)
@@ -372,6 +540,8 @@ class GatewayStore:
                 connection.execute(
                     "DELETE FROM rate_limits WHERE window_start < ?", (window_start - window_seconds,)
                 )
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
                 if count > limit:
                     connection.rollback()
                     raise GatewayError(ErrorCode.RATE_LIMITED, 429)
@@ -379,6 +549,8 @@ class GatewayStore:
         except GatewayError:
             raise
         except sqlite3.Error as exc:
+            if deadline is not None:
+                raise self._analysis_sqlite_error(exc, deadline, busy_ms) from exc
             raise self._storage_error(exc) from exc
 
     @staticmethod
