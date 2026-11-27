@@ -4,12 +4,16 @@
 'require ui';
 'require poll';
 'require smart-upgrade.model as model';
+'require smart-upgrade.remote as remote';
 
 var callStatus = rpc.declare({ object: 'smart_upgrade', method: 'status', expect: {} });
 var callScan = rpc.declare({ object: 'smart_upgrade', method: 'scan', expect: {} });
 var callSnapshot = rpc.declare({ object: 'smart_upgrade', method: 'snapshot', expect: {} });
 var callPlan = rpc.declare({ object: 'smart_upgrade', method: 'plan', expect: {} });
 var callReport = rpc.declare({ object: 'smart_upgrade', method: 'report', expect: {} });
+var callTargets = rpc.declare({ object: 'smart_upgrade', method: 'targets', expect: {} });
+var callSnapshotIdentity = rpc.declare({ object: 'smart_upgrade', method: 'snapshot_identity', expect: {} });
+var callAnalyze = rpc.declare({ object: 'smart_upgrade', method: 'analyze', params: [ 'target_ref', 'snapshot_id', 'scan_generation', 'snapshot_sha256' ], expect: {} });
 
 function rpcFallback(error) {
 	return {
@@ -53,6 +57,188 @@ function messageList(values, className) {
 	}));
 }
 
+function gatewayError(response) {
+	switch (response && response.error_code) {
+	case 'SNAPSHOT_UNVERIFIED':
+	case 'SNAPSHOT_CHANGED':
+		return _('Unknown — a current verified scan is required.');
+	case 'SNAPSHOT_REFERENCE_UNAVAILABLE':
+		return _('Unavailable — this scan has no current Gateway reference.');
+	case 'TARGET_EVIDENCE_UNAVAILABLE':
+		return _('Unavailable — refresh the targets and verify the current scan reference.');
+	case 'GATEWAY_LIMITED':
+		return _('Unavailable — the Gateway request limit was reached.');
+	default:
+		return _('Unavailable — check Gateway access and permissions.');
+	}
+}
+
+function targetLabel(target) {
+	return [ target.distribution, target.version, target.target, target.profile, target.filesystem,
+		target.image_type, target.architecture, target.package_manager ].join(' · ');
+}
+
+function expiryText(expiresAt) {
+	return new Date(expiresAt * 1000).toLocaleString();
+}
+
+function remotePanel() {
+	var state = new remote.AnalysisDisplay();
+	var catalog = [], refreshSequence = 0, expiryTimer;
+	var normalMessage = _('Unknown — no current analysis.');
+	var now = function() { return window.performance.now(); };
+	var select = E('select', { 'class': 'cbi-input-select', 'aria-label': _('Gateway target') });
+	var refresh = E('button', { 'class': 'cbi-button', 'type': 'button' }, _('Refresh targets'));
+	var analyze = E('button', { 'class': 'cbi-button cbi-button-action', 'type': 'button', 'disabled': true }, _('Analyze'));
+	var targetDetails = E('p', { 'class': 'smart-upgrade-muted' });
+	var resultNode = E('div', { 'role': 'status', 'aria-live': 'polite' });
+
+	function populate() {
+		select.replaceChildren(E('option', { 'value': '' }, _('Select target')));
+		catalog = catalog.filter(function(target) {
+			return remote.fresh(target.deadline, now());
+		});
+		catalog.forEach(function(target) {
+			select.appendChild(E('option', { 'value': target.target_ref }, targetLabel(target)));
+		});
+		select.value = state.target ? state.target.target_ref : '';
+	}
+
+	function show(message) {
+		window.clearTimeout(expiryTimer);
+		if (state.expire(now())) {
+			populate();
+			message = _('Unavailable — the target or analysis expired.');
+		}
+		var target = state.target;
+		var result = state.result;
+		analyze.disabled = !target || state.pending;
+		targetDetails.textContent = target ? _('Target expires') + ' ' + expiryText(target.expires_at) : '';
+		if (result) {
+			var packages = result.package_summary;
+			var storage = result.storage_risk;
+			resultNode.replaceChildren(
+				E('p', {}, result.status === 'blocked' ? _('Blocked') : _('Eligible for migration analysis')),
+				E('p', {}, _('Analysis expires') + ' ' + expiryText(result.expires_at)),
+				messageList(result.blockers, 'smart-upgrade-errors'),
+				keyValueTable([
+					[ _('Installed packages'), packages.installed ],
+					[ _('Keep / replace / skip'), [ packages.keep, packages.replace, packages.skip ].join(' / ') ],
+					[ _('Review / block'), [ packages.review, packages.block ].join(' / ') ],
+					[ _('Docker present'), storage.docker_present ? _('Yes') : storage.status === 'ok' ? _('No') : _('Unknown') ],
+					[ _('Storage evidence'), model.display(storage.status) ],
+					[ _('Disk overwrite risks'), storage.firmware_overwrite_risks.join(', ') || _('Unknown') ]
+				])
+			);
+		} else {
+			resultNode.textContent = message || normalMessage;
+		}
+		var expiry = catalog.reduce(function(earliest, entry) {
+			return Math.min(earliest, entry.deadline);
+		}, result ? result.deadline : Infinity);
+		if (Number.isFinite(expiry)) {
+			expiryTimer = window.setTimeout(function() {
+				populate();
+				show(message);
+			}, Math.max(0, Math.min(2147483647, Math.ceil(expiry - now()))));
+		}
+	}
+
+	function loadTargets() {
+		var turn = ++refreshSequence;
+		state.select(null);
+		catalog = [];
+		populate();
+		show(_('Loading targets…'));
+		var startedAt = now();
+		return callTargets().catch(function() { return null; }).then(function(reply) {
+			if (turn !== refreshSequence)
+				return;
+			if (reply && reply.available === true && Array.isArray(reply.targets))
+				catalog = reply.targets.map(function(target) { return remote.withDeadline(target, startedAt); })
+					.filter(Boolean);
+			populate();
+			show(catalog.length ? normalMessage : gatewayError(reply));
+		});
+	}
+
+	function requestAnalysis() {
+		var sequence = state.begin();
+		show(_('Analyzing the current scan…'));
+		return callSnapshotIdentity().catch(function() { return null; }).then(function(before) {
+			var ticket = state.capture(sequence, before, now());
+			if (!ticket) {
+				if (sequence === state.sequence) {
+					state.invalidate();
+					show(gatewayError(before || { error_code: 'SNAPSHOT_UNVERIFIED' }));
+				}
+				return;
+			}
+			var startedAt = now();
+			return callAnalyze(ticket.target_ref, ticket.scan.snapshot_id, ticket.scan.scan_generation,
+				ticket.scan.snapshot_sha256).catch(function() { return null; }).then(function(reply) {
+				if (sequence !== state.sequence)
+					return;
+				return callSnapshotIdentity().catch(function() { return null; }).then(function(after) {
+					if (sequence !== state.sequence)
+						return;
+					var result = remote.withDeadline(reply, startedAt);
+					var checkedAt = now();
+					if (state.accept(ticket, result, after, checkedAt))
+						show();
+					else if (result && !remote.fresh(result.deadline, checkedAt))
+						show(_('Unavailable — the target or analysis expired.'));
+					else
+						show(gatewayError(result ? { error_code: 'SNAPSHOT_CHANGED' } : reply));
+				});
+			});
+		});
+	}
+
+	select.addEventListener('change', function() {
+		var target = catalog.find(function(entry) {
+			return entry.target_ref === select.value && remote.fresh(entry.deadline, now());
+		});
+		state.select(target || null);
+		show();
+	});
+	refresh.addEventListener('click', loadTargets);
+	analyze.addEventListener('click', requestAnalysis);
+	populate();
+	show();
+	loadTargets();
+	return {
+		node: section(_('Gateway targets and analysis'),
+			_('Eligibility describes migration analysis. Dispatch and flashing are disabled.'),
+			E('div', {}, [ E('div', { 'class': 'smart-upgrade-actions' }, [ select, refresh, analyze ]),
+				targetDetails, resultNode ])),
+		invalidate: function(message) {
+			state.invalidate();
+			show(message);
+		},
+		check: function(status) {
+			if (!status || status.available === false || status.error_code ||
+			    [ 'idle', 'running', 'completed', 'partial' ].indexOf(status.scan_status) < 0) {
+				this.invalidate(_('Unavailable — current scan status could not be verified.'));
+				return Promise.resolve();
+			}
+			if (status.scan_status === 'running') {
+				this.invalidate();
+				return Promise.resolve();
+			}
+			if (!state.scan || !(state.pending || state.result))
+				return Promise.resolve();
+			var pending = state.sequence;
+			return callSnapshotIdentity().catch(function() { return null; }).then(function(current) {
+				if (pending === state.sequence && state.observe(current, now())) {
+					populate();
+					show();
+				}
+			});
+		}
+	};
+}
+
 return view.extend({
 	load: function() {
 		return Promise.all([
@@ -64,6 +250,8 @@ return view.extend({
 	},
 
 	handleScan: function(ev) {
+		if (this.remotePanel)
+			this.remotePanel.invalidate();
 		var button = ev.currentTarget;
 		button.disabled = true;
 		button.classList.add('spinning');
@@ -298,6 +486,8 @@ return view.extend({
 		if (evidence.report.available !== true)
 			evidence.report.error_message = report.available === true ?
 				_('Migration evidence does not match this scan. Refresh to try again.') : report.error_message;
+		this.remotePanel = remotePanel();
+		var gatewayPanel = this.remotePanel;
 		var root = E('div', { 'class': 'smart-upgrade-page' }, [
 			E('h1', {}, _('Smart Upgrade')),
 			E('div', { 'class': 'alert-message warning' },
@@ -306,13 +496,15 @@ return view.extend({
 			this.renderScanner(status, snapshotEnvelope),
 			this.renderPackages(snapshot, plan),
 			this.renderServicesAndStorage(snapshot),
-			this.renderReport(evidence.report)
+			this.renderReport(evidence.report),
+			gatewayPanel.node
 		]);
 		var stateNode = root.querySelector('.smart-upgrade-section:nth-of-type(2) .smart-upgrade-badge');
 		poll.add(function() {
-			return callStatus().then(function(next) {
+			return callStatus().catch(function() { return null; }).then(function(next) {
 				if (stateNode)
-					stateNode.textContent = model.display(next.scan_status);
+					stateNode.textContent = model.display(next && next.scan_status);
+				return gatewayPanel.check(next);
 			});
 		}, 5);
 		return root;

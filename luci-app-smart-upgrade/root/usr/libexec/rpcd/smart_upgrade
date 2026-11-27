@@ -18,6 +18,7 @@ PROC_ROOT=${SMART_UPGRADE_PROC_ROOT:-/proc}
 BOOT_ID_FILE=${SMART_UPGRADE_BOOT_ID_FILE:-$PROC_ROOT/sys/kernel/random/boot_id}
 SELF_START_TICKS=${SMART_UPGRADE_SELF_START_TICKS:-}
 SCAN_TIMEOUT=${SMART_UPGRADE_SCAN_TIMEOUT:-180}
+GATEWAY_CLIENT=${SMART_UPGRADE_GATEWAY_CLIENT:-/usr/libexec/smart-upgrade/gateway-client}
 STATE=$STATE_DIR/scan-state.json
 LOCK=$STATE_DIR/scan.lock
 ACQUIRE_GATE=$STATE_DIR/scan.acquire
@@ -34,7 +35,7 @@ MAX_MANIFEST_BYTES=131072
 
 case "${1:-}" in
 list)
-	printf '%s\n' '{"status":{},"scan":{},"snapshot":{},"plan":{},"report":{}}'
+	printf '%s\n' '{"status":{},"scan":{},"snapshot":{},"plan":{},"report":{},"snapshot_identity":{},"targets":{},"analyze":{"target_ref":"string","snapshot_id":"string","scan_generation":"string","snapshot_sha256":"string"}}'
 	exit 0
 	;;
 call|scan-worker) ;;
@@ -528,6 +529,39 @@ emit_snapshot() {
 	printf '%s\n' '}'
 }
 
+current_remote_snapshot() {
+	[ ! -e "$LOCK" ] && [ ! -L "$LOCK" ] && load_snapshot_bundle &&
+		[ ! -e "$LOCK" ] && [ ! -L "$LOCK" ]
+}
+
+emit_snapshot_identity() {
+	if ! current_remote_snapshot; then emit_error SNAPSHOT_UNVERIFIED "No current byte-verified Snapshot"; return; fi
+	json_init
+	json_add_boolean available 1
+	json_add_string integrity_status verified
+	json_add_string snapshot_id "$snapshot_id"
+	json_add_string scan_generation "$generation"
+	json_add_string snapshot_sha256 "$SNAPSHOT_FILE_SHA"
+	json_add_boolean dispatch_allowed 0
+	json_add_boolean flash_ready 0
+	json_dump
+}
+
+request_remote_analysis() {
+	if ! current_remote_snapshot; then emit_error SNAPSHOT_UNVERIFIED "No current byte-verified Snapshot"; return; fi
+	requested_id=$snapshot_id requested_generation=$generation requested_sha=$SNAPSHOT_FILE_SHA
+	if ! result=$("$GATEWAY_CLIENT" analyze "$requested_id" "$requested_generation" "$requested_sha" 2>/dev/null); then
+		emit_error GATEWAY_UNAVAILABLE "Gateway is unavailable"
+		return
+	fi
+	if ! current_remote_snapshot || [ "$snapshot_id" != "$requested_id" ] ||
+		[ "$generation" != "$requested_generation" ] || [ "$SNAPSHOT_FILE_SHA" != "$requested_sha" ]; then
+		emit_error SNAPSHOT_CHANGED "The current scan has changed"
+		return
+	fi
+	printf '%s\n' "$result"
+}
+
 validate_plan() {
 	[ "$(json_value "$PLAN" '@.schema_version')" = 1.0.0 ] || return 1
 	plan_id=$(json_value "$PLAN" '@.plan_id')
@@ -650,12 +684,24 @@ if [ "$1" = scan-worker ]; then
 	run_scan
 	exit
 fi
+case "${2:-}" in
+	targets)
+		"$GATEWAY_CLIENT" targets 2>/dev/null || emit_error GATEWAY_UNAVAILABLE "Gateway is unavailable"
+		exit 0
+		;;
+	analyze)
+		initialize_state || exit 0
+		request_remote_analysis
+		exit 0
+		;;
+esac
 cat >/dev/null
 initialize_state || exit 0
 case "${2:-}" in
 	status) emit_status ;;
 	scan) request_scan ;;
 	snapshot) emit_snapshot ;;
+	snapshot_identity) emit_snapshot_identity ;;
 	plan) emit_plan ;;
 	report) emit_report ;;
 	*) emit_error METHOD_NOT_FOUND "Unknown Smart Upgrade method" ;;
