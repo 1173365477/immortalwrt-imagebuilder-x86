@@ -64,7 +64,11 @@ No Snapshot upload or collector signer is exposed by these RPC methods.
 The browser captures the triple, target reference, resolution digest and a
 request sequence. It re-reads the current verified identity before displaying
 a result. Scan changes, target selection, catalog refresh and expiry
-invalidate previous results. An older response cannot replace the current
+invalidate previous results. An unavailable scan status also clears the result
+and invalidates in-flight analysis. The router supplies `remaining_ms` for
+each target and result. The browser anchors it to the monotonic time when the
+RPC started, conservatively deducting the entire RPC wait. Absolute expiry is
+used only for the display label. An older response cannot replace the current
 one. Results received after expiry, with mixed provenance, or with either
 safety flag set are unavailable. The result panel distinguishes strict
 `blocked` from missing or unavailable evidence.

@@ -172,11 +172,12 @@ def target_output(reply):
                 or not row["verified_at"] < row["expires_at"]):
             raise ValueError("invalid target evidence")
         refs.add(row["target_ref"])
-        if row["expires_at"] > now:
+        remaining_ms = int((row["expires_at"] - now) * 1000)
+        if remaining_ms > 0:
             targets.append({key: row[key] for key in (
                 *text, "distribution", "target", "package_manager", "target_ref",
                 "resolution_digest", "verified_at", "expires_at",
-            )})
+            )} | {"remaining_ms": remaining_ms})
     if not targets:
         raise Unavailable("TARGET_EVIDENCE_UNAVAILABLE")
     return {"targets": targets}
@@ -184,8 +185,7 @@ def target_output(reply):
 
 def analysis_output(reply, subject, binding):
     if (not all(reply.get(key) == value for key, value in subject.items())
-            or not epoch(reply.get("expires_at")) or reply["expires_at"] <= time.time()
-            or binding["expires_at"] <= time.time()
+            or not epoch(reply.get("expires_at"))
             or not matches(HEX, reply.get("resolution_digest"))):
         raise Unavailable("TARGET_EVIDENCE_UNAVAILABLE")
     counts = reply.get("package_summary")
@@ -207,11 +207,15 @@ def analysis_output(reply, subject, binding):
             or any(not isinstance(value, str) or value not in RISK
                    for value in risk["firmware_overwrite_risks"])):
         raise ValueError("invalid analysis result")
+    expires_at = min(reply["expires_at"], binding["expires_at"])
+    remaining_ms = int((expires_at - time.time()) * 1000)
+    if remaining_ms <= 0:
+        raise Unavailable("TARGET_EVIDENCE_UNAVAILABLE")
     return {
         **subject, "status": status, "blockers": blockers, "package_summary": counts,
         "storage_risk": {key: risk[key] for key in ("status", "docker_present", "firmware_overwrite_risks")},
         "resolution_digest": reply["resolution_digest"],
-        "expires_at": min(reply["expires_at"], binding["expires_at"]),
+        "expires_at": expires_at, "remaining_ms": remaining_ms,
     }
 
 

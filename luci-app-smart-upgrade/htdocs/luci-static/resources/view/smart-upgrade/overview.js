@@ -86,7 +86,7 @@ function remotePanel() {
 	var state = new remote.AnalysisDisplay();
 	var catalog = [], refreshSequence = 0, expiryTimer;
 	var normalMessage = _('Unknown — no current analysis.');
-	var now = function() { return Date.now() / 1000; };
+	var now = function() { return window.performance.now(); };
 	var select = E('select', { 'class': 'cbi-input-select', 'aria-label': _('Gateway target') });
 	var refresh = E('button', { 'class': 'cbi-button', 'type': 'button' }, _('Refresh targets'));
 	var analyze = E('button', { 'class': 'cbi-button cbi-button-action', 'type': 'button', 'disabled': true }, _('Analyze'));
@@ -95,9 +95,10 @@ function remotePanel() {
 
 	function populate() {
 		select.replaceChildren(E('option', { 'value': '' }, _('Select target')));
-		catalog.filter(function(target) {
-			return remote.fresh(target.expires_at, now());
-		}).forEach(function(target) {
+		catalog = catalog.filter(function(target) {
+			return remote.fresh(target.deadline, now());
+		});
+		catalog.forEach(function(target) {
 			select.appendChild(E('option', { 'value': target.target_ref }, targetLabel(target)));
 		});
 		select.value = state.target ? state.target.target_ref : '';
@@ -105,6 +106,10 @@ function remotePanel() {
 
 	function show(message) {
 		window.clearTimeout(expiryTimer);
+		if (state.expire(now())) {
+			populate();
+			message = _('Unavailable — the target or analysis expired.');
+		}
 		var target = state.target;
 		var result = state.result;
 		analyze.disabled = !target || state.pending;
@@ -128,16 +133,14 @@ function remotePanel() {
 		} else {
 			resultNode.textContent = message || normalMessage;
 		}
-		var expiry = Math.min(target ? target.expires_at : Infinity, result ? result.expires_at : Infinity);
+		var expiry = catalog.reduce(function(earliest, entry) {
+			return Math.min(earliest, entry.deadline);
+		}, result ? result.deadline : Infinity);
 		if (Number.isFinite(expiry)) {
 			expiryTimer = window.setTimeout(function() {
-				if (state.expire(now())) {
-					populate();
-					show(_('Unavailable — the target or analysis expired.'));
-				} else {
-					show(message);
-				}
-			}, Math.max(20, Math.min(2147483647, Math.ceil((expiry - now()) * 1000))));
+				populate();
+				show(message);
+			}, Math.max(0, Math.min(2147483647, Math.ceil(expiry - now()))));
 		}
 	}
 
@@ -147,10 +150,13 @@ function remotePanel() {
 		catalog = [];
 		populate();
 		show(_('Loading targets…'));
+		var startedAt = now();
 		return callTargets().catch(function() { return null; }).then(function(reply) {
 			if (turn !== refreshSequence)
 				return;
-			catalog = reply && reply.available === true && Array.isArray(reply.targets) ? reply.targets : [];
+			if (reply && reply.available === true && Array.isArray(reply.targets))
+				catalog = reply.targets.map(function(target) { return remote.withDeadline(target, startedAt); })
+					.filter(Boolean);
 			populate();
 			show(catalog.length ? normalMessage : gatewayError(reply));
 		});
@@ -168,22 +174,31 @@ function remotePanel() {
 				}
 				return;
 			}
+			var startedAt = now();
 			return callAnalyze(ticket.target_ref, ticket.scan.snapshot_id, ticket.scan.scan_generation,
 				ticket.scan.snapshot_sha256).catch(function() { return null; }).then(function(reply) {
 				if (sequence !== state.sequence)
 					return;
 				return callSnapshotIdentity().catch(function() { return null; }).then(function(after) {
-					var accepted = state.accept(ticket, reply, after, now());
-					if (sequence === state.sequence)
-						show(accepted ? null : gatewayError(reply && reply.available === true ?
-							{ error_code: 'SNAPSHOT_CHANGED' } : reply));
+					if (sequence !== state.sequence)
+						return;
+					var result = remote.withDeadline(reply, startedAt);
+					var checkedAt = now();
+					if (state.accept(ticket, result, after, checkedAt))
+						show();
+					else if (result && !remote.fresh(result.deadline, checkedAt))
+						show(_('Unavailable — the target or analysis expired.'));
+					else
+						show(gatewayError(result ? { error_code: 'SNAPSHOT_CHANGED' } : reply));
 				});
 			});
 		});
 	}
 
 	select.addEventListener('change', function() {
-		var target = catalog.find(function(entry) { return entry.target_ref === select.value; });
+		var target = catalog.find(function(entry) {
+			return entry.target_ref === select.value && remote.fresh(entry.deadline, now());
+		});
 		state.select(target || null);
 		show();
 	});
@@ -197,12 +212,17 @@ function remotePanel() {
 			_('Eligibility describes migration analysis. Dispatch and flashing are disabled.'),
 			E('div', {}, [ E('div', { 'class': 'smart-upgrade-actions' }, [ select, refresh, analyze ]),
 				targetDetails, resultNode ])),
-		invalidate: function() {
+		invalidate: function(message) {
 			state.invalidate();
-			show();
+			show(message);
 		},
-		check: function(scanStatus) {
-			if (scanStatus === 'running') {
+		check: function(status) {
+			if (!status || status.available === false || status.error_code ||
+			    [ 'idle', 'running', 'completed', 'partial' ].indexOf(status.scan_status) < 0) {
+				this.invalidate(_('Unavailable — current scan status could not be verified.'));
+				return Promise.resolve();
+			}
+			if (status.scan_status === 'running') {
 				this.invalidate();
 				return Promise.resolve();
 			}
@@ -481,10 +501,10 @@ return view.extend({
 		]);
 		var stateNode = root.querySelector('.smart-upgrade-section:nth-of-type(2) .smart-upgrade-badge');
 		poll.add(function() {
-			return callStatus().then(function(next) {
+			return callStatus().catch(function() { return null; }).then(function(next) {
 				if (stateNode)
-					stateNode.textContent = model.display(next.scan_status);
-				return gatewayPanel.check(next.scan_status);
+					stateNode.textContent = model.display(next && next.scan_status);
+				return gatewayPanel.check(next);
 			});
 		}, 5);
 		return root;

@@ -138,17 +138,26 @@ def test_fixed_tls_calls_and_sanitized_analysis(client, https_gateway, capsys):
     reply["body"] = json.dumps(targets(now)).encode()
     catalog = client.invoke("targets", {}, b'{"ubus_rpc_session":"11111111111111111111111111111111"}', directory)
     assert catalog["available"] and catalog["targets"][0]["target_ref"] == TARGET
+    assert 0 < catalog["targets"][0]["remaining_ms"] <= 300_000
     assert calls == [("GET", "/targets", "Bearer " + BEARER, b"")]
     reply["body"] = json.dumps(analysis(now)).encode()
     result = client.invoke("analyze", SUBJECT, requested(), directory)
     assert result["available"] and result["status"] == "blocked"
     assert result["blockers"] == ["BOOT_MODE_UNVERIFIED"]
     assert result["snapshot_sha256"] == SUBJECT["snapshot_sha256"]
+    assert 0 < result["remaining_ms"] <= 150_000
     assert result["flash_ready"] is result["dispatch_allowed"] is False
     assert calls[-1][:3] == ("POST", "/analysis", "Bearer " + BEARER)
     assert json.loads(calls[-1][3]) == {"snapshot_ref": REF, "target_ref": TARGET}
     assert BEARER not in json.dumps([catalog, result]) and REF not in json.dumps(result)
     assert capsys.readouterr() == ("", "")
+
+
+def test_analysis_remaining_time_is_capped_by_local_reference(client):
+    now = int(time.time())
+    result = client.analysis_output(analysis(now), SUBJECT, {"expires_at": now + 10})
+    assert result["expires_at"] == now + 10
+    assert 0 < result["remaining_ms"] <= 10_000
 
 
 @pytest.mark.parametrize("defect", ["missing", "expired", "device", "id", "generation", "bytes", "file_mode", "symlink"])
@@ -259,12 +268,13 @@ def test_luci_result_binding(event):
     program = r"""
 const fs = require('fs'), assert = require('node:assert/strict');
 const { event, scan, catalog, analysis } = JSON.parse(fs.readFileSync(0));
-const { AnalysisDisplay } = new Function('baseclass', fs.readFileSync(process.argv[1], 'utf8'))({extend:x=>x});
-const state = new AnalysisDisplay(), target = catalog.targets[0], now = 1700000000;
+const { AnalysisDisplay, withDeadline } = new Function('baseclass', fs.readFileSync(process.argv[1], 'utf8'))({extend:x=>x});
+const state = new AnalysisDisplay(), now = 5000;
+const target = withDeadline({...catalog.targets[0], remaining_ms:300000}, now);
 state.select(target);
 const ticket = state.capture(state.begin(), scan, now);
 assert(ticket);
-let current = scan, response = analysis;
+let current = scan, response = withDeadline({...analysis, remaining_ms:150000}, now);
 if (event === 'new_scan')
   current = {...scan, scan_generation: scan.scan_generation + '1'};
 else if (event === 'same_id_new_bytes')
@@ -277,16 +287,16 @@ else if (event === 'revoked')
   response = {available:false,error_code:'RPC_UNAVAILABLE'};
 else if (event === 'out_of_order') {
   const latest = state.capture(state.begin(), scan, now);
-  assert.equal(state.accept(latest, {...analysis, status:'eligible'}, scan, now), true);
-  assert.equal(state.accept(ticket, analysis, scan, now), false);
+  assert.equal(state.accept(latest, {...response, status:'eligible'}, scan, now), true);
+  assert.equal(state.accept(ticket, response, scan, now), false);
   process.stdout.write(JSON.stringify(state.result.status));
   return;
 } else if (event === 'expired_response')
-  response = {...analysis, expires_at:now};
+  response = {...response, deadline:now};
 const accepted = state.accept(ticket, response, current, now);
 if (event === 'expired_display') {
   assert.equal(accepted, true);
-  assert.equal(state.expire(response.expires_at), true);
+  assert.equal(state.expire(response.deadline), true);
 }
 process.stdout.write(JSON.stringify(state.result && state.result.status));
 """
@@ -296,54 +306,112 @@ process.stdout.write(JSON.stringify(state.result && state.result.status));
     }) == {"match": "blocked", "out_of_order": "eligible"}.get(event)
 
 
-@pytest.mark.parametrize("denied", [False, True])
-def test_panel_shows_bound_result_and_reports_rpc_denial(denied):
+@pytest.mark.parametrize("event", ["match", "denied", "clock_slow", "clock_fast", "delayed",
+                                   "status_denied", "status_unavailable", "late_after_denial"])
+def test_panel_shows_only_current_verified_results(event):
     program = r"""
 const fs = require('fs'), assert = require('node:assert/strict');
-const { denied, scan, catalog, analysis } = JSON.parse(fs.readFileSync(0));
+const { event, scan, catalog, analysis } = JSON.parse(fs.readFileSync(0));
 const remote = new Function('baseclass', fs.readFileSync(process.argv[1], 'utf8'))({extend:x=>x});
 const original = fs.readFileSync(process.argv[2], 'utf8');
 const rpcCalls = [];
+let clock = 0, statusChanged = false, current = scan, resolveAnalysis;
+Date.now = () => (analysis.expires_at - 150) * 1000 +
+  (event === 'clock_slow' ? -3600000 : event === 'clock_fast' ? 3600000 : 0);
 const rpc = { declare: spec => (...args) => {
   rpcCalls.push({method: spec.method, args});
   if (spec.method === 'targets') return Promise.resolve({available:true,...catalog});
-  if (spec.method === 'snapshot_identity') return Promise.resolve(scan);
-  if (spec.method === 'analyze') return denied ? Promise.reject(new Error('Access denied')) : Promise.resolve(analysis);
+  if (spec.method === 'snapshot_identity') return Promise.resolve(current);
+  if (spec.method === 'status') {
+    if (!statusChanged) return Promise.resolve({scan_status:'completed'});
+    if (event === 'status_unavailable') return Promise.resolve({available:false});
+    return Promise.reject(new Error('Access denied'));
+  }
+  if (spec.method === 'analyze') {
+    if (event === 'denied') return Promise.reject(new Error('Access denied'));
+    if (event === 'late_after_denial') return new Promise(resolve => { resolveAnalysis = resolve; });
+    clock += event === 'delayed' ? 150001 : 2500;
+    return Promise.resolve(analysis);
+  }
   throw new Error('Unexpected RPC method');
 }};
 const elements = [];
 function E(tag, attributes, children) {
   const el = {
     tag, attributes, children: Array.isArray(children) ? children : children == null ? [] : [children],
-    events: {}, value: '', textContent: '',
+    events: {}, value: '', text: '',
+    get textContent() { return this.text; },
+    set textContent(value) { this.text = value; this.children = []; },
     appendChild(child) { this.children.push(child); },
-    replaceChildren(...children) { this.children = children; this.textContent = ''; },
+    replaceChildren(...children) { this.children = children; this.text = ''; },
     addEventListener(event, fn) { this.events[event] = fn; },
+    querySelector() { return null; },
   };
   elements.push(el);
   return el;
 }
-const window = { clearTimeout() {}, setTimeout() {} };
-const panel = new Function('rpc','model','remote','E','_','window',
-  original.substring(0, original.indexOf('\nreturn view.extend')) + '\nreturn remotePanel();'
-)(rpc,{display:String},remote,E,x=>x,window);
+let timer, pollOnce;
+const window = {
+  performance: { now: () => clock },
+  clearTimeout() { timer = null; },
+  setTimeout(fn, delay) { timer = {fn, delay}; },
+};
+const model = {display:String, bindEvidence: () => ({report:{available:true}})};
+const view = new Function('rpc','model','remote','E','_','window','view','poll','document', original)(
+  rpc, model, remote, E, x=>x, window, {extend:x=>x}, {add: fn => { pollOnce = fn; }},
+  {querySelector: () => true});
+for (const name of ['renderOverview', 'renderScanner', 'renderPackages', 'renderServicesAndStorage', 'renderReport'])
+  view[name] = () => E('div', {});
+view.render([{}, {}, {}, {}]);
 (async function() {
   await new Promise(resolve => setImmediate(resolve));
   const select = elements.find(el => el.tag === 'select'), buttons = elements.filter(el => el.tag === 'button');
   select.value = catalog.targets[0].target_ref;
   select.events.change();
   assert.equal(buttons[1].disabled, false);
-  await buttons[1].events.click();
+  const request = buttons[1].events.click();
+  if (event === 'late_after_denial') await new Promise(resolve => setImmediate(resolve));
+  else await request;
   const calls = rpcCalls.filter(call => call.method === 'analyze');
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].args, [select.value, scan.snapshot_id, scan.scan_generation, scan.snapshot_sha256]);
   const result = elements.find(el => el.attributes.role === 'status');
-  process.stdout.write(JSON.stringify(denied ? result.textContent : result.children[0].children[0]));
+  if (['match', 'clock_slow', 'clock_fast', 'status_denied', 'status_unavailable'].includes(event))
+    assert.equal(result.children[0].children[0], 'Blocked');
+  if (event === 'clock_slow' || event === 'clock_fast') {
+    assert.equal(timer.delay, 147500);
+    clock += timer.delay;
+    timer.fn();
+  }
+  if (['status_denied', 'status_unavailable', 'late_after_denial'].includes(event)) {
+    current = {...scan, scan_generation: scan.scan_generation + '1'};
+    statusChanged = true;
+    await pollOnce();
+    if (resolveAnalysis) {
+      const identityCalls = rpcCalls.filter(call => call.method === 'snapshot_identity').length;
+      resolveAnalysis(analysis);
+      await request;
+      assert.equal(rpcCalls.filter(call => call.method === 'snapshot_identity').length, identityCalls);
+    }
+    assert.equal(result.children.length, 0);
+  }
+  process.stdout.write(JSON.stringify(result.textContent || result.children[0].children[0]));
 })().catch(e => { console.error(e); process.exit(1); });
 """
     now = int(time.time())
+    catalog = targets(now)
+    catalog["targets"][0]["remaining_ms"] = 300_000
     result = run_node(program, {
-        "denied": denied, "scan": {**SUBJECT, "available": True, "integrity_status": "verified"},
-        "catalog": targets(now), "analysis": {**analysis(now), "available": True},
+        "event": event, "scan": {**SUBJECT, "available": True, "integrity_status": "verified"},
+        "catalog": catalog, "analysis": {**analysis(now), "available": True, "remaining_ms": 150_000},
     })
-    assert result == ("Unavailable — check Gateway access and permissions." if denied else "Blocked")
+    assert result == {
+        "match": "Blocked",
+        "denied": "Unavailable — check Gateway access and permissions.",
+        "clock_slow": "Unavailable — the target or analysis expired.",
+        "clock_fast": "Unavailable — the target or analysis expired.",
+        "delayed": "Unavailable — the target or analysis expired.",
+        "status_denied": "Unavailable — current scan status could not be verified.",
+        "status_unavailable": "Unavailable — current scan status could not be verified.",
+        "late_after_denial": "Unavailable — current scan status could not be verified.",
+    }[event]

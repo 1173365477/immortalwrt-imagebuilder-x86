@@ -19,8 +19,16 @@ function sameScan(a, b) {
 		a.scan_generation === b.scan_generation && a.snapshot_sha256 === b.snapshot_sha256;
 }
 
-function fresh(expiresAt, now) {
-	return Number.isSafeInteger(expiresAt) && expiresAt > now;
+function withDeadline(evidence, startedAt) {
+	if (!evidence || !Number.isSafeInteger(evidence.expires_at) || evidence.expires_at <= 0 ||
+	    !Number.isSafeInteger(evidence.remaining_ms) || evidence.remaining_ms <= 0)
+		return null;
+	// Anchoring at send time conservatively subtracts the entire RPC wait.
+	return Object.assign({}, evidence, { deadline: startedAt + evidence.remaining_ms });
+}
+
+function fresh(deadline, now) {
+	return Number.isFinite(deadline) && deadline > now;
 }
 
 function AnalysisDisplay() {
@@ -51,7 +59,7 @@ AnalysisDisplay.prototype.begin = function() {
 
 AnalysisDisplay.prototype.capture = function(sequence, envelope, now) {
 	var scan = identity(envelope);
-	if (sequence !== this.sequence || !this.pending || !scan || !this.target || !fresh(this.target.expires_at, now))
+	if (sequence !== this.sequence || !this.pending || !scan || !this.target || !fresh(this.target.deadline, now))
 		return null;
 	this.scan = scan;
 	return {
@@ -65,22 +73,22 @@ AnalysisDisplay.prototype.accept = function(ticket, response, envelope, now) {
 		return false;
 	this.pending = false;
 	if (!this.target || this.target.target_ref !== ticket.target_ref ||
-	    this.target.resolution_digest !== ticket.resolution_digest || !fresh(this.target.expires_at, now) ||
+	    this.target.resolution_digest !== ticket.resolution_digest || !fresh(this.target.deadline, now) ||
 	    !sameScan(ticket.scan, identity(envelope)) || !response || response.available !== true ||
 	    response.dispatch_allowed !== false || response.flash_ready !== false ||
 	    !sameScan(ticket.scan, response) || ticket.resolution_digest !== response.resolution_digest ||
-	    !fresh(response.expires_at, now) || [ 'eligible', 'blocked' ].indexOf(response.status) < 0)
+	    !fresh(response.deadline, now) || [ 'eligible', 'blocked' ].indexOf(response.status) < 0)
 		return false;
 	this.result = response;
 	return true;
 };
 
 AnalysisDisplay.prototype.expire = function(now) {
-	if (this.target && !fresh(this.target.expires_at, now)) {
+	if (this.target && !fresh(this.target.deadline, now)) {
 		this.select(null);
 		return true;
 	}
-	if (this.result && !fresh(this.result.expires_at, now)) {
+	if (this.result && !fresh(this.result.deadline, now)) {
 		this.invalidate();
 		return true;
 	}
@@ -99,5 +107,6 @@ AnalysisDisplay.prototype.observe = function(envelope, now) {
 
 return baseclass.extend({
 	AnalysisDisplay: AnalysisDisplay,
-	fresh: fresh
+	fresh: fresh,
+	withDeadline: withDeadline
 });
