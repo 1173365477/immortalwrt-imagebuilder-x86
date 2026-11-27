@@ -367,8 +367,11 @@ that it verified, never caller-declared metadata or arbitrary uploads.
 Admission enforces Snapshot v1 Schema, the `evidence-sha256-v2` identity
 format, a 2 MiB limit, bounded structure and the remote value allowlists.
 The remote subset rejects local mode, extension fields, arbitrary
-diagnostics, non-redacted storage and unsafe values. Some otherwise valid
-local Snapshots require a future collector-side privacy policy revision.
+diagnostics, non-redacted storage and unsafe values. Dependencies and provides
+must fully match the supported APK or OPKG grammar. Structured dependency rows
+must match the raw list and the scanner projection. Credential-shaped text is
+rejected before persisting the unchanged, collector-signed Snapshot bytes.
+Some otherwise valid local Snapshots require a future collector-side privacy policy revision.
 Current partial scanner evidence remains admissible where its fields fit
 the remote policy and produces a blocked strict analysis.
 
@@ -418,8 +421,16 @@ Blocker codes include `STRICT_PLAN_BLOCKED`, `SNAPSHOT_INCOMPLETE`,
 `THIRDPARTY_EVIDENCE_UNVERIFIED`. No trusted third-party binary evidence is
 admitted through this interface. Package names, paths, raw planner
 diagnostics and Snapshot contents stay inside the service. At most two
-catalog or analysis jobs run simultaneously by default, with a ten-second
-HTTP deadline and capacity held until the worker returns.
+catalog or analysis jobs run simultaneously by default. `POST /analysis`
+uses one ten-second monotonic budget starting at the HTTP entry, including
+body, authentication, rate limit, analysis and receipt publication. A worker
+still running after a 503 keeps its execution slot until it exits. SQLite
+writer lock waits use the remaining budget and the worker checks expiry and
+the deadline again before committing. A receipt whose commit began within
+the deadline can remain stored if the commit finishes after the deadline or
+the response times out. A 503 does not return its ID or delete any prior
+receipt. Expired receipts follow the ordinary retention process. `GET /targets`
+bounds its catalog worker separately.
 
 `eligible` is a migration analysis outcome. It creates no build task,
 dispatch intent, T13 Build Input or GitHub state. Existing `POST /builds`

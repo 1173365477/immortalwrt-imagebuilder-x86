@@ -10,6 +10,8 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
+from scripts.migration_plan import APK_COMPARISON_PATTERN
+
 from .targets import SHA_PATTERN, strict_json
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,9 +19,19 @@ MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024
 DEFAULT_SNAPSHOT_TTL = 24 * 3600
 GENERATION = re.compile(r"[a-f0-9]{64}-[1-9][0-9]{0,11}-[1-9][0-9]{0,9}")
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+@~-]{0,127}")
-DEP_TEXT = re.compile(r"[A-Za-z0-9_+.@~:>=<!(),| -]+")
+PACKAGE_NAME = r"[A-Za-z0-9][A-Za-z0-9_.+@-]*"
+APK_ATOM = re.compile(
+    rf"(?P<conflict>!)?(?:(?:so|cmd|pc|virtual):)?{PACKAGE_NAME}"
+    rf"(?:(?:<~|>~|~|{APK_COMPARISON_PATTERN})[0-9][A-Za-z0-9_.+~-]*)?"
+)
+OPKG_ATOM = re.compile(
+    rf"{PACKAGE_NAME}(?:[ \t]*\([ \t]*(?:<<|>>|{APK_COMPARISON_PATTERN})[ \t]*"
+    r"(?:[0-9]+:)?[A-Za-z0-9][A-Za-z0-9_.+~-]*[ \t]*\))?"
+)
+SCANNER_NAME = re.compile(PACKAGE_NAME)
+SCANNER_OPERATOR = re.compile(rf"{APK_COMPARISON_PATTERN}|~")
 SENSITIVE_TOKEN = re.compile(
-    r"(?:gh[pousr]_|github_pat_|AKIA[A-Z0-9]{16}|xox[baprs]-|sk_(?:live|test)_|"
+    r"(?:(?:authorization\s*:|\b(?:bearer|basic)\s+[A-Za-z0-9_.+~-]+)|gh[pousr]_|github_pat_|AKIA[A-Z0-9]{16}|xox[baprs]-|sk_(?:live|test)_|"
     r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.|"
     r"(?:[a-zA-Z0-9_.+-]+)@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}|"
     r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}|(?:password|passwd|secret|token)\s*[=:])",
@@ -71,6 +83,54 @@ def restricted(value: str | None, pattern=IDENTIFIER) -> None:
         raise ValueError("snapshot value violates remote privacy policy")
 
 
+def dependency_clauses(raw: str | None, manager: str, *, provides: bool = False) -> list[str]:
+    if raw is None:
+        return []
+    if SENSITIVE_TOKEN.search(raw) or any(ord(char) < 32 and char != "\t" for char in raw):
+        raise ValueError("snapshot dependency violates remote privacy policy")
+    if manager == "apk":
+        clauses = re.split(r"[ \t]+", raw.strip(" \t"))
+        for clause in clauses:
+            atom = APK_ATOM.fullmatch(clause)
+            if atom is None or (provides and atom["conflict"]):
+                raise ValueError("invalid APK dependency or provide")
+        return clauses
+    if manager == "opkg":
+        clauses = [clause.strip(" \t") for clause in raw.split(",")]
+        for clause in clauses:
+            alternatives = clause.split("|")
+            if (provides and len(alternatives) != 1) or any(
+                not OPKG_ATOM.fullmatch(atom.strip(" \t")) for atom in alternatives
+            ):
+                raise ValueError("invalid OPKG dependency or provide")
+        return clauses
+    raise ValueError("dependencies require a recognized package manager")
+
+
+def validate_dependency_rows(rows: list[dict], clauses: list[str]) -> None:
+    if [row["raw"] for row in rows] != clauses:
+        raise ValueError("structured dependencies do not match raw evidence")
+    for row in rows:
+        text = row["raw"]
+        relation = "package"
+        if text.startswith("so:"):
+            relation, text = "soname", text[3:]
+        elif text.startswith("virtual:"):
+            relation, text = "virtual", text[8:]
+        name = SCANNER_NAME.match(text)
+        remainder = text[name.end():] if name else ""
+        operator = SCANNER_OPERATOR.match(remainder)
+        # Compare with the existing scanner projection. OPKG parenthesized
+        # constraints and APK namespaces remain in the validated raw evidence.
+        expected = (
+            relation, name[0] if name else None, operator[0] if operator else None,
+            (remainder[operator.end():] or None) if operator else None,
+            None if name else "unrecognized-dependency-expression",
+        )
+        if tuple(row.get(key) for key in ("relation", "name", "operator", "version", "parse_error")) != expected:
+            raise ValueError("invalid structured dependency evidence")
+
+
 def validate_snapshot(raw: bytes) -> dict:
     if len(raw) > MAX_SNAPSHOT_BYTES:
         raise ValueError("snapshot exceeds byte limit")
@@ -99,19 +159,14 @@ def validate_snapshot(raw: bytes) -> dict:
     for package in installed:
         restricted(package["name"])
         restricted(package["version"])
-        restricted(package["dependencies_raw"], DEP_TEXT)
-        restricted(package["provides_raw"], DEP_TEXT)
+        clauses = dependency_clauses(package["dependencies_raw"], system["package_manager"])
+        dependency_clauses(package["provides_raw"], system["package_manager"], provides=True)
+        validate_dependency_rows(package["depends"], clauses)
         for proof in package["evidence"]:
             if proof not in PACKAGE_PROOFS and not re.fullmatch(
                 r"rom-package-origin-manifest:sha256:[a-f0-9]{64}", proof
             ):
                 raise ValueError("unsupported package provenance evidence")
-        for dep in package["depends"]:
-            restricted(dep["name"])
-            restricted(dep["version"], DEP_TEXT)
-            restricted(dep["raw"], DEP_TEXT)
-            if dep.get("parse_error") not in (None, "unrecognized-dependency-expression"):
-                raise ValueError("unsupported dependency diagnostic")
     storage = snapshot["storage"]
     if set(storage["errors"]) - STORAGE_ERRORS:
         raise ValueError("unsupported remote storage diagnostic")

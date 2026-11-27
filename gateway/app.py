@@ -73,14 +73,46 @@ class GatewaySettings:
 class BodySizeLimitMiddleware:
     """Buffer a bounded request body before any route or validation code sees it."""
 
-    def __init__(self, app: Any, max_bytes: int):
+    def __init__(self, app: Any, max_bytes: int, analysis_timeout: float):
         self.app = app
         self.max_bytes = max_bytes
+        self.analysis_timeout = analysis_timeout
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        analysis_paths = ("/analysis", scope.get("root_path", "").rstrip("/") + "/analysis")
+        if scope["method"] != "POST" or scope["path"] not in analysis_paths:
+            await self._bounded_body(scope, receive, send)
+            return
+
+        deadline = time.monotonic() + self.analysis_timeout
+        scope["analysis_deadline"] = deadline
+        started = False
+
+        async def track_response(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                if time.monotonic() >= deadline:
+                    raise TimeoutError
+                started = True
+            await send(message)
+
+        try:
+            async with asyncio.timeout(deadline - time.monotonic()):
+                await self._bounded_body(scope, receive, track_response)
+        except TimeoutError:
+            if started:
+                raise  # HTTP status has already been sent.
+            error = ErrorCode.ANALYSIS_UNAVAILABLE
+            audit("request_failed", endpoint="/analysis", error_code=error.value)
+            await JSONResponse(
+                {"error": {"code": error.value, "message": PUBLIC_MESSAGES[error]}},
+                status_code=503,
+            )(scope, receive, send)
+
+    async def _bounded_body(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         headers = {key.lower(): value for key, value in scope.get("headers", [])}
         content_length = headers.get(b"content-length")
         if content_length:
@@ -219,7 +251,8 @@ def create_app(
         openapi_url="/openapi.json",
         lifespan=lifespan,
     )
-    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes)
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes,
+                       analysis_timeout=settings.analysis_timeout_seconds)
     app.state.settings = settings
     app.state.store = store
     app.state.verifier = verifier
@@ -363,16 +396,17 @@ def create_app(
             raise GatewayError(ErrorCode.AUTH_INVALID, 401)
         return store.authenticate(token)
 
-    def apply_rate_limit(identity: DeviceIdentity, endpoint: str) -> None:
+    def apply_rate_limit(identity: DeviceIdentity, endpoint: str, *, deadline: float | None = None) -> None:
         store.consume_rate_limit(
             identity.device_id,
             endpoint,
             limit=settings.rate_limit_requests,
             window_seconds=settings.rate_limit_window_seconds,
+            deadline=deadline,
         )
 
-    async def run_analysis(function, *args):
-        if analysis_slots.locked():
+    async def run_analysis(function, *args, deadline: float):
+        if time.monotonic() >= deadline or analysis_slots.locked():
             raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
         await analysis_slots.acquire()
         loop = asyncio.get_running_loop()
@@ -390,7 +424,7 @@ def create_app(
         future.add_done_callback(release_slot)
         try:
             return await asyncio.wait_for(
-                asyncio.shield(future), timeout=settings.analysis_timeout_seconds,
+                asyncio.shield(future), timeout=deadline - time.monotonic(),
             )
         except GatewayError:
             raise
@@ -407,14 +441,19 @@ def create_app(
         check_analysis_policy()
         if request.url.query or await request.body():
             raise GatewayError(ErrorCode.INVALID_REQUEST, 422)
-        result = await run_analysis(analysis.targets)
+        result = await run_analysis(
+            analysis.targets, deadline=time.monotonic() + settings.analysis_timeout_seconds,
+        )
         audit("targets_read", endpoint="GET:/targets", device=device_fingerprint(identity.device_id))
         return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
     @app.post("/analysis", responses={401: {}, 403: {}, 404: {}, 409: {}, 410: {},
                                       413: {}, 422: {}, 429: {}, 503: {}})
     async def post_analysis(request: Request, identity: DeviceIdentity = Depends(authenticate)):
-        await run_in_threadpool(apply_rate_limit, identity, "POST:/analysis")
+        deadline = request.scope["analysis_deadline"]
+        await run_in_threadpool(apply_rate_limit, identity, "POST:/analysis", deadline=deadline)
+        if time.monotonic() >= deadline:
+            raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
         check_analysis_policy()
         media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
         try:
@@ -429,8 +468,10 @@ def create_app(
             raise GatewayError(ErrorCode.INVALID_REQUEST, 422) from None
         result = await run_analysis(
             analysis.analyze, identity, body["snapshot_ref"], body["target_ref"],
-            time.monotonic() + settings.analysis_timeout_seconds,
+            deadline, deadline=deadline,
         )
+        if time.monotonic() >= deadline:
+            raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
         audit("analysis_completed", endpoint="POST:/analysis",
               device=device_fingerprint(identity.device_id), status=result["status"])
         return JSONResponse(result, headers={"Cache-Control": "no-store"})

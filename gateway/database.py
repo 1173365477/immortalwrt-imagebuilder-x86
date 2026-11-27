@@ -367,11 +367,32 @@ class GatewayStore:
         except sqlite3.Error as exc:
             raise self._storage_error(exc) from exc
 
+    def _limit_analysis_lock_wait(self, connection: sqlite3.Connection, deadline: float) -> int:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
+        busy_ms = min(self.busy_timeout_ms, int(remaining * 1000))
+        connection.execute(f"PRAGMA busy_timeout={busy_ms}")
+        return busy_ms
+
+    def _analysis_sqlite_error(
+        self, exc: sqlite3.Error, deadline: float, busy_ms: int,
+    ) -> GatewayError:
+        lock_error = (getattr(exc, "sqlite_errorcode", 0) & 0xff) in (
+            sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED,
+        )
+        if time.monotonic() >= deadline or (lock_error and busy_ms < self.busy_timeout_ms):
+            return GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
+        return self._storage_error(exc)
+
     def record_analysis(self, identity: DeviceIdentity, binding: dict, expires_at: int,
                         deadline: float) -> str:
         analysis_id = secrets.token_hex(24)
+        serialized = json.dumps(binding, separators=(",", ":"))
+        busy_ms = self.busy_timeout_ms
         try:
             with self._connect() as connection:
+                busy_ms = self._limit_analysis_lock_wait(connection, deadline)
                 connection.execute("BEGIN IMMEDIATE")
                 now = int(time.time())
                 if time.monotonic() >= deadline:
@@ -387,12 +408,16 @@ class GatewayStore:
                     raise GatewayError(ErrorCode.AUTH_INVALID, 401)
                 connection.execute(
                     "INSERT INTO analysis_receipts VALUES (?, ?, ?, ?)",
-                    (analysis_id, identity.device_id, json.dumps(binding, separators=(",", ":")),
-                     expires_at),
+                    (analysis_id, identity.device_id, serialized, expires_at),
                 )
+                if time.monotonic() >= deadline:
+                    raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
+                if expires_at <= int(time.time()):
+                    raise GatewayError(ErrorCode.ANALYSIS_EXPIRED, 410)
+                connection.commit()
                 return analysis_id
         except sqlite3.Error as exc:
-            raise self._storage_error(exc) from exc
+            raise self._analysis_sqlite_error(exc, deadline, busy_ms) from exc
 
     def purge_expired_analysis(self) -> int:
         try:
@@ -487,13 +512,19 @@ class GatewayStore:
         return DeviceIdentity(row["device_id"], row["credential_id"])
 
     def consume_rate_limit(
-        self, device_id: str, endpoint: str, *, limit: int, window_seconds: int, now: int | None = None
+        self, device_id: str, endpoint: str, *, limit: int, window_seconds: int,
+        now: int | None = None, deadline: float | None = None,
     ) -> None:
         timestamp = int(time.time() if now is None else now)
         window_start = timestamp - (timestamp % window_seconds)
+        busy_ms = self.busy_timeout_ms
         try:
             with self._connect() as connection:
+                if deadline is not None:
+                    busy_ms = self._limit_analysis_lock_wait(connection, deadline)
                 connection.execute("BEGIN IMMEDIATE")
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
                 connection.execute(
                     """INSERT INTO rate_limits(device_id, endpoint, window_start, count)
                        VALUES (?, ?, ?, 1)
@@ -509,6 +540,8 @@ class GatewayStore:
                 connection.execute(
                     "DELETE FROM rate_limits WHERE window_start < ?", (window_start - window_seconds,)
                 )
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
                 if count > limit:
                     connection.rollback()
                     raise GatewayError(ErrorCode.RATE_LIMITED, 429)
@@ -516,6 +549,8 @@ class GatewayStore:
         except GatewayError:
             raise
         except sqlite3.Error as exc:
+            if deadline is not None:
+                raise self._analysis_sqlite_error(exc, deadline, busy_ms) from exc
             raise self._storage_error(exc) from exc
 
     @staticmethod

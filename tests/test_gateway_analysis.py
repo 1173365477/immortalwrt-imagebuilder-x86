@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import sqlite3
 import subprocess
 import sys
@@ -485,3 +486,203 @@ def test_refresh_timeout_and_lost_race_preserve_last_verified_catalog(tmp_path, 
     assert lifecycle == [("join", 12), ("join", None)]
     assert not list(tmp_path.glob(".catalog-*"))
     assert targets.load_catalog(path) == entry
+
+
+@pytest.mark.parametrize(("manager", "raw_dependencies", "provides", "rows"), [
+    ("apk", "libc>=1.2.5-r0 so:libubus.so.20250102 virtual:rpc-provider !old-provider",
+     "cmd:sh=1.37.0-r12 virtual:luci-app-example=2.0.0-r1",
+     [("libc>=1.2.5-r0", "package", "libc", ">=", "1.2.5-r0"),
+      ("so:libubus.so.20250102", "soname", "libubus.so.20250102", None, None),
+      ("virtual:rpc-provider", "virtual", "rpc-provider", None, None),
+      ("!old-provider", "package", None, None, None)]),
+    ("opkg", "libc (>= 1:1.2.5-r0), libfoo | libbar (<< 2.0)",
+     "virtual-shell (= 1.0), shell",
+     [("libc (>= 1:1.2.5-r0)", "package", "libc", None, None),
+      ("libfoo | libbar (<< 2.0)", "package", "libfoo", None, None)]),
+])
+def test_admits_supported_scanner_dependency_syntax(gateway, manager, raw_dependencies, provides, rows):
+    store, _, _, _, _, _ = gateway
+    doc = snapshot()
+    doc["system"]["package_manager"] = manager
+    depends = [dict(zip(("raw", "relation", "name", "operator", "version"), row)) for row in rows]
+    for row in depends:
+        if row["name"] is None:
+            row["parse_error"] = "unrecognized-dependency-expression"
+    doc["packages"]["installed"][-1].update(
+        dependencies_raw=raw_dependencies, provides_raw=provides, depends=depends,
+    )
+    ref, raw, claims = issue(store, doc)
+    stored = store.get_admitted_snapshot("device-one", ref)
+    assert stored["payload"] == raw
+    assert stored["snapshot_sha256"] == sha(raw)
+    assert stored["scan_generation"] == claims["scan_generation"]
+
+
+@pytest.mark.parametrize("field", ["provides_raw", "dependencies_raw", "depends.raw", "depends.version"])
+def test_signed_sensitive_dependency_is_rejected_before_storage(gateway, field, caplog):
+    store, client, token, _, entry, _ = gateway
+    canary = "Authorization: Bearer SYNTHETIC_CANARY_ONLY"
+    doc = snapshot()
+    package = doc["packages"]["installed"][-1]
+    if field.startswith("depends."):
+        package["depends"][0][field.split(".")[1]] = canary
+    else:
+        package[field] = canary
+    raw = encoded(doc)
+    claims = record(raw)
+    with pytest.raises(ValueError) as denied:
+        store.admit_snapshot(raw, claims, KEY, ttl=3600)
+    assert "untrusted collector" not in str(denied.value)
+    assert canary not in str(denied.value)
+    with caplog.at_level(logging.INFO, logger="smart_upgrade.gateway"):
+        response = analyze(client, token, "f" * 48, entry["target_ref"])
+    assert response.status_code == 404
+    assert "request_failed" in caplog.text
+    assert canary not in response.text and canary not in caplog.text
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM admitted_snapshots").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(("manager", "provided"), [
+    ("apk", "virtual:"),
+    ("apk", "libc=>3.0"),
+    ("opkg", "unchecked free text"),
+    ("opkg", "virtual-x (>= 1.0) trailing"),
+])
+def test_provide_must_parse_as_a_complete_expression(manager, provided):
+    doc = snapshot()
+    doc["system"]["package_manager"] = manager
+    doc["packages"]["installed"][-1]["provides_raw"] = provided
+    with pytest.raises(ValueError, match="dependency or provide"):
+        validate_snapshot(encoded(doc))
+
+
+def receipts(store):
+    with sqlite3.connect(store.path) as connection:
+        return {row[0] for row in connection.execute("SELECT analysis_id FROM analysis_receipts")}
+
+
+def test_analysis_deadline_includes_slow_rate_limit(gateway, monkeypatch):
+    store, _, token, _, entry, _ = gateway
+    ref, _, _ = issue(store, snapshot())
+    store_type = type(store)
+    real_rate_limit = store_type.consume_rate_limit
+    entered = threading.Event()
+    release = threading.Event()
+    analyze_called = threading.Event()
+
+    def delayed_rate_limit(self, device, endpoint, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return real_rate_limit(self, device, endpoint, **kwargs)
+
+    def unexpected_analysis(*args):
+        analyze_called.set()
+        pytest.fail("analysis started after rate limiting exhausted its budget")
+
+    monkeypatch.setattr(store_type, "consume_rate_limit", delayed_rate_limit)
+    monkeypatch.setattr(AnalysisService, "analyze", unexpected_analysis)
+    app = create_app(GatewaySettings(database_path=store.path, analysis_timeout_seconds=0.5))
+    with TestClient(app, base_url="https://testserver") as client:
+        try:
+            response = analyze(client, token, ref, entry["target_ref"])
+            assert entered.is_set() and not release.is_set()
+            assert response.status_code == 503
+            assert response.json()["error"]["code"] == "ANALYSIS_UNAVAILABLE"
+        finally:
+            release.set()
+    assert not analyze_called.is_set()
+    assert not receipts(store)
+
+
+@pytest.mark.parametrize("delay_at", ["write_lock", "insert", "after_commit"])
+def test_analysis_deadline_and_receipt_commit_boundary(gateway, monkeypatch, delay_at):
+    store, normal_client, token, _, entry, _ = gateway
+    ref, _, _ = issue(store, snapshot())
+    before = analyze(normal_client, token, ref, entry["target_ref"])
+    assert before.status_code == 200
+    old_receipts = receipts(store)
+    assert old_receipts == {before.json()["analysis_id"]}
+    store_type = type(store)
+    original_record = store_type.record_analysis
+    entered = threading.Event()
+    finished = threading.Event()
+    release = threading.Event()
+    lock = sqlite3.connect(store.path, check_same_thread=False)
+    if delay_at == "insert":
+        lock.execute("""CREATE TRIGGER delay_insert BEFORE INSERT ON analysis_receipts
+                        BEGIN SELECT test_delay(); END""")
+        lock.commit()
+        original_connect = store_type._connect
+
+        def delay_insert():
+            entered.set()
+            assert release.wait(5)
+
+        def connect_with_delay(self):
+            conn = original_connect(self)
+            conn.create_function("test_delay", 0, delay_insert)
+            return conn
+
+        monkeypatch.setattr(store_type, "_connect", connect_with_delay)
+
+    def record_with_delay(self, *args):
+        try:
+            if delay_at == "write_lock":
+                lock.execute("BEGIN IMMEDIATE")
+                entered.set()
+            ident = original_record(self, *args)
+            if delay_at == "after_commit":
+                entered.set()
+                assert release.wait(5)
+            return ident
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(store_type, "record_analysis", record_with_delay)
+    app = create_app(GatewaySettings(database_path=store.path, analysis_workers=1,
+                                     analysis_timeout_seconds=0.7))
+    try:
+        with TestClient(app, base_url="https://testserver") as client:
+            try:
+                response = analyze(client, token, ref, entry["target_ref"])
+                assert entered.is_set()
+                assert response.status_code == 503
+                assert response.json()["error"]["code"] == "ANALYSIS_UNAVAILABLE"
+                assert "analysis_id" not in response.json()
+                if delay_at == "write_lock":
+                    # Wait while the independent writer still holds the lock.
+                    assert finished.wait(2)
+                else:
+                    assert not finished.is_set()
+            finally:
+                release.set()
+                lock.rollback()
+            assert finished.wait(3)
+            assert old_receipts <= receipts(store)
+            assert len(receipts(store) - old_receipts) == int(delay_at == "after_commit")
+    finally:
+        lock.close()
+    assert_no_builds(store)
+
+
+def test_analysis_deadline_starts_before_body_is_complete(gateway):
+    store, _, token, _, _, _ = gateway
+    app = create_app(GatewaySettings(database_path=store.path, analysis_timeout_seconds=0.15))
+
+    async def exercise():
+        async def slow_body():
+            yield b'{'
+            await asyncio.sleep(5)
+            pytest.fail("request deadline did not interrupt the unfinished body")
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="https://testserver") as client:
+            response = await client.post("/analysis", content=slow_body(), headers={
+                **auth(token), "Content-Type": "application/json",
+            })
+            assert response.status_code == 503
+            assert response.json()["error"]["code"] == "ANALYSIS_UNAVAILABLE"
+
+    asyncio.run(exercise())
+    assert not receipts(store)

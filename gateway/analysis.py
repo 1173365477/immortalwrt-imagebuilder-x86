@@ -44,6 +44,8 @@ class AnalysisService:
 
     def analyze(self, identity: DeviceIdentity, snapshot_ref: str, target_ref: str,
                 deadline: float) -> dict:
+        if time.monotonic() >= deadline:
+            raise GatewayError(ErrorCode.ANALYSIS_UNAVAILABLE, 503)
         # Resolve ownership before checking target evidence or returning its status.
         admitted = self.store.get_admitted_snapshot(identity.device_id, snapshot_ref)
         target = self._catalog()
