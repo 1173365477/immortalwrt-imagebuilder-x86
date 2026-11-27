@@ -235,6 +235,31 @@ def test_build_input_positive_stages_exact_bytes(tmp_path):
     assert tree_digest(stage / "files") == result["staged_files_digest"]
 
 
+@pytest.mark.parametrize(("identity", "reason"), [
+    ({"identity_status": "conflict"}, "source system identity is conflicted"),
+    ({"kernel_architecture": "aarch64"}, "source kernel architecture"),
+    ({"boot_mode": "unknown", "boot_evidence": "no_affirmative_evidence"}, "boot mode is unknown"),
+    ({"boot_evidence": "fixture_override"}, "boot mode is unknown"),
+])
+def test_build_gate_rechecks_snapshot_identity_even_with_an_approved_plan(tmp_path, identity, reason):
+    path, build_input = frozen_request(tmp_path)
+    repo = tmp_path / "repo"
+    snapshot_ref = build_input["snapshot"]
+    snapshot_path = repo / snapshot_ref["path"]
+    snapshot = json.loads(snapshot_path.read_text())
+    snapshot["system"].update(identity)
+    if identity.get("identity_status") == "conflict":
+        snapshot["status"] = "partial"
+        snapshot["system"]["identity_errors"] = ["target_uname_arch_mismatch"]
+    write_json(snapshot_path, snapshot)
+    snapshot_ref["file_sha256"] = sha256_file(snapshot_path)
+    rewrite_input(path, build_input)
+
+    with pytest.raises(EvidenceError, match=reason):
+        verify_build_input(path, repo, expected_repository=REPOSITORY, expected_commit=COMMIT,
+                           revalidate_upstream=False)
+
+
 def test_gateway_binds_real_t13_context_to_requested_digest(tmp_path, monkeypatch):
     path, value = frozen_request(tmp_path)
     repo = tmp_path / "repo"
@@ -242,6 +267,7 @@ def test_gateway_binds_real_t13_context_to_requested_digest(tmp_path, monkeypatc
     scripts.mkdir()
     shutil.copy2(ROOT / "scripts/verify-build-input.py", scripts / "verify-build-input.py")
     shutil.copy2(ROOT / "scripts/build_evidence.py", scripts / "build_evidence.py")
+    shutil.copy2(ROOT / "scripts/migration_plan.py", scripts / "migration_plan.py")
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Gateway Test"], cwd=repo, check=True)
@@ -280,6 +306,7 @@ def test_t14b_code_ancestor_and_evidence_commit_are_separate(tmp_path, monkeypat
     scripts.mkdir()
     shutil.copy2(ROOT / "scripts/verify-build-input.py", scripts / "verify-build-input.py")
     shutil.copy2(ROOT / "scripts/build_evidence.py", scripts / "build_evidence.py")
+    shutil.copy2(ROOT / "scripts/migration_plan.py", scripts / "migration_plan.py")
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Gateway Test"], cwd=repo, check=True)
