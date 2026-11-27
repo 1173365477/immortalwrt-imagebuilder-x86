@@ -490,13 +490,13 @@ def test_refresh_timeout_and_lost_race_preserve_last_verified_catalog(tmp_path, 
 
 @pytest.mark.parametrize(("manager", "raw_dependencies", "provides", "rows"), [
     ("apk", "libc>=1.2.5-r0 so:libubus.so.20250102 virtual:rpc-provider !old-provider",
-     "cmd:sh=1.37.0-r12 virtual:luci-app-example=2.0.0-r1",
+     "cmd:sh=1.37.0-r12 virtual:luci-app-example=2.0.0-r1 AWS_SECRET_ACCESS_KEY_HELPER=1.0",
      [("libc>=1.2.5-r0", "package", "libc", ">=", "1.2.5-r0"),
       ("so:libubus.so.20250102", "soname", "libubus.so.20250102", None, None),
       ("virtual:rpc-provider", "virtual", "rpc-provider", None, None),
       ("!old-provider", "package", None, None, None)]),
     ("opkg", "libc (>= 1:1.2.5-r0), libfoo | libbar (<< 2.0)",
-     "virtual-shell (= 1.0), shell",
+     "virtual-shell (= 1.0), shell, AWS_SECRET_ACCESS_KEY_HELPER (= 1.0)",
      [("libc (>= 1:1.2.5-r0)", "package", "libc", None, None),
       ("libfoo | libbar (<< 2.0)", "package", "libfoo", None, None)]),
 ])
@@ -539,6 +539,38 @@ def test_signed_sensitive_dependency_is_rejected_before_storage(gateway, field, 
     assert response.status_code == 404
     assert "request_failed" in caplog.text
     assert canary not in response.text and canary not in caplog.text
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM admitted_snapshots").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("manager", ["apk", "opkg"])
+@pytest.mark.parametrize("field", ["dependencies_raw", "provides_raw"])
+def test_signed_credential_key_is_rejected_before_storage(gateway, manager, field, caplog):
+    store, client, token, _, entry, _ = gateway
+    key = "AWS_SECRET_ACCESS_KEY"
+    placeholder = "1.SYNTHETIC_PRIVACY_CANARY"
+    expression = f"{key}={placeholder}" if manager == "apk" else f"{key} (= {placeholder})"
+    doc = snapshot()
+    doc["system"]["package_manager"] = manager
+    package = doc["packages"]["installed"][-1]
+    package[field] = expression
+    if field == "dependencies_raw":
+        package["depends"] = [{
+            "raw": expression,
+            "relation": "package",
+            "name": key,
+            "operator": "=" if manager == "apk" else None,
+            "version": placeholder if manager == "apk" else None,
+        }]
+    raw = encoded(doc)
+    with caplog.at_level(logging.INFO, logger="smart_upgrade.gateway"):
+        with pytest.raises(ValueError, match="snapshot dependency violates remote privacy policy") as denied:
+            store.admit_snapshot(raw, record(raw), KEY, ttl=3600)
+        response = analyze(client, token, "f" * 48, entry["target_ref"])
+    assert response.status_code == 404
+    assert "request_failed" in caplog.text
+    assert placeholder not in str(denied.value)
+    assert placeholder not in response.text and placeholder not in caplog.text
     with sqlite3.connect(store.path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM admitted_snapshots").fetchone()[0] == 0
 

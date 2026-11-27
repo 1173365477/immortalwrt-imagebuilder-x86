@@ -21,13 +21,14 @@ GENERATION = re.compile(r"[a-f0-9]{64}-[1-9][0-9]{0,11}-[1-9][0-9]{0,9}")
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+@~-]{0,127}")
 PACKAGE_NAME = r"[A-Za-z0-9][A-Za-z0-9_.+@-]*"
 APK_ATOM = re.compile(
-    rf"(?P<conflict>!)?(?:(?:so|cmd|pc|virtual):)?{PACKAGE_NAME}"
-    rf"(?:(?:<~|>~|~|{APK_COMPARISON_PATTERN})[0-9][A-Za-z0-9_.+~-]*)?"
+    rf"(?P<conflict>!)?(?:(?:so|cmd|pc|virtual):)?(?P<name>{PACKAGE_NAME})"
+    rf"(?:(?:<~|>~|~|{APK_COMPARISON_PATTERN})(?P<version>[0-9][A-Za-z0-9_.+~-]*))?"
 )
 OPKG_ATOM = re.compile(
-    rf"{PACKAGE_NAME}(?:[ \t]*\([ \t]*(?:<<|>>|{APK_COMPARISON_PATTERN})[ \t]*"
-    r"(?:[0-9]+:)?[A-Za-z0-9][A-Za-z0-9_.+~-]*[ \t]*\))?"
+    rf"(?P<name>{PACKAGE_NAME})(?:[ \t]*\([ \t]*(?:<<|>>|{APK_COMPARISON_PATTERN})[ \t]*"
+    r"(?P<version>(?:[0-9]+:)?[A-Za-z0-9][A-Za-z0-9_.+~-]*)[ \t]*\))?"
 )
+CREDENTIAL_KEYS = {"aws_access_key_id", "aws_secret_access_key", "aws_session_token"}
 SCANNER_NAME = re.compile(PACKAGE_NAME)
 SCANNER_OPERATOR = re.compile(rf"{APK_COMPARISON_PATTERN}|~")
 SENSITIVE_TOKEN = re.compile(
@@ -90,21 +91,24 @@ def dependency_clauses(raw: str | None, manager: str, *, provides: bool = False)
         raise ValueError("snapshot dependency violates remote privacy policy")
     if manager == "apk":
         clauses = re.split(r"[ \t]+", raw.strip(" \t"))
-        for clause in clauses:
-            atom = APK_ATOM.fullmatch(clause)
-            if atom is None or (provides and atom["conflict"]):
-                raise ValueError("invalid APK dependency or provide")
-        return clauses
-    if manager == "opkg":
+        pattern = APK_ATOM
+    elif manager == "opkg":
         clauses = [clause.strip(" \t") for clause in raw.split(",")]
-        for clause in clauses:
-            alternatives = clause.split("|")
-            if (provides and len(alternatives) != 1) or any(
-                not OPKG_ATOM.fullmatch(atom.strip(" \t")) for atom in alternatives
-            ):
-                raise ValueError("invalid OPKG dependency or provide")
-        return clauses
-    raise ValueError("dependencies require a recognized package manager")
+        pattern = OPKG_ATOM
+    else:
+        raise ValueError("dependencies require a recognized package manager")
+
+    for clause in clauses:
+        alternatives = clause.split("|") if manager == "opkg" else [clause]
+        if provides and len(alternatives) != 1:
+            raise ValueError("invalid OPKG dependency or provide")
+        for expression in alternatives:
+            atom = pattern.fullmatch(expression.strip(" \t"))
+            if atom is None or (provides and manager == "apk" and atom["conflict"]):
+                raise ValueError(f"invalid {manager.upper()} dependency or provide")
+            if atom["version"] is not None and atom["name"].lower() in CREDENTIAL_KEYS:
+                raise ValueError("snapshot dependency violates remote privacy policy")
+    return clauses
 
 
 def validate_dependency_rows(rows: list[dict], clauses: list[str]) -> None:
