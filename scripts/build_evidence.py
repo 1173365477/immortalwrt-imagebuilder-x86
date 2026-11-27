@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 from jsonschema import Draft202012Validator
+from migration_plan import source_image_compatibility
 
 
 HEX_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -225,6 +226,14 @@ def verify_build_input(
         raise EvidenceError("target/subtarget binding mismatch")
     if target["package_manager"] != "apk" or plan_target["compatibility"] != "compatible":
         raise EvidenceError("only a validated compatible APK target is supported")
+    _, boot_mode, identity_blockers = source_image_compatibility(
+        snapshot["system"], target=plan_target["target"], profile=target["profile"],
+        architecture=target["architecture"], image_type=target["image_type"],
+    )
+    if identity_blockers:
+        raise EvidenceError("source image compatibility is blocked: " + "; ".join(identity_blockers))
+    if plan["source"]["boot_mode"] != boot_mode or plan_target["boot_mode"] != boot_mode:
+        raise EvidenceError("migration plan boot mode does not match verified source evidence")
 
     release = build_input["release"]
     for key in ("resolution_digest", "official_index_digest", "imagebuilder_url", "imagebuilder_sha256"):

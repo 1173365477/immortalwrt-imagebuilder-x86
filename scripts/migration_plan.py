@@ -247,6 +247,49 @@ def _thirdparty_compatibility(
     return True, "verified provider, release, asset, APK, architecture and dependency evidence matched"
 
 
+def source_image_compatibility(
+    system: dict[str, Any], *, target: str | None, profile: str | None,
+    architecture: str | None, image_type: str | None,
+) -> tuple[str, str, list[str]]:
+    """Check source identity and boot evidence for an automatic image choice."""
+    conflicts: list[str] = []
+    unknown: list[str] = []
+    identity_status = system.get("identity_status")
+    if identity_status == "conflict":
+        conflicts.append("source system identity is conflicted")
+    elif identity_status != "consistent":
+        unknown.append("source system identity is not confirmed")
+
+    expected = {
+        "target": target,
+        "profile": profile,
+        "package_architecture": architecture,
+    }
+    # Current x86/64 support has a known Linux uname value. Package and
+    # kernel architecture names are not generally interchangeable.
+    if target == "x86/64":
+        expected["architecture"] = "x86_64"
+        expected["kernel_architecture"] = "x86_64"
+    for field, requested in expected.items():
+        actual = system.get(field)
+        label = field.replace("_", " ")
+        if actual in (None, "", "unknown") or requested in (None, "", "unknown"):
+            unknown.append(f"source {label} compatibility is unknown")
+        elif actual != requested:
+            conflicts.append(f"source {label} {actual!r} does not match target {requested!r}")
+
+    boot_mode = "unknown"
+    if system.get("boot_mode") == "efi" and system.get("boot_evidence") == "linux_efi_sysfs":
+        boot_mode = "efi"
+        if image_type != "combined-efi":
+            conflicts.append("EFI source requires a combined-efi image")
+    else:
+        # No production Legacy BIOS evidence source is defined in Snapshot v1.
+        unknown.append("boot mode is unknown; selected image compatibility cannot be proven")
+    status = "incompatible" if conflicts else "unknown" if unknown else "compatible"
+    return status, boot_mode, conflicts + unknown
+
+
 def generate_plan(
     snapshot: dict[str, Any],
     capabilities: dict[str, Any],
@@ -294,29 +337,12 @@ def generate_plan(
         errors.append("official package index is missing or empty")
 
     system = snapshot.get("system", {})
-    compatibility = "compatible"
-    identity_checks = {
-        "target": (system.get("target"), capabilities.get("target")),
-        "profile": (system.get("profile"), capabilities.get("profile")),
-        "architecture": (system.get("package_architecture"), capabilities.get("arch")),
-    }
-    for label, (source_value, target_value) in identity_checks.items():
-        if not source_value or source_value != target_value:
-            blockers.append(
-                f"source {label} {source_value!r} does not match target {target_value!r}"
-            )
-            compatibility = "incompatible" if source_value else "unknown"
-    boot_mode = system.get("boot_mode", "unknown")
     image_type = capabilities.get("image_type")
-    if boot_mode == "unknown":
-        blockers.append("boot mode is unknown; selected image compatibility cannot be proven")
-        compatibility = "unknown"
-    elif boot_mode == "efi" and image_type != "combined-efi":
-        blockers.append("EFI source requires a combined-efi image")
-        compatibility = "incompatible"
-    elif boot_mode == "bios" and image_type != "combined":
-        blockers.append("Legacy BIOS source requires a combined image")
-        compatibility = "incompatible"
+    compatibility, boot_mode, identity_blockers = source_image_compatibility(
+        system, target=capabilities.get("target"), profile=capabilities.get("profile"),
+        architecture=capabilities.get("arch"), image_type=image_type,
+    )
+    blockers.extend(identity_blockers)
 
     exclusion_map, exclusion_errors = _exclusion_map(exclusions, snapshot)
     errors.extend(exclusion_errors)
