@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from urllib.error import HTTPError
 
-import httpx
+import httpx2 as httpx
 import pytest
 import yaml
 from fastapi.testclient import TestClient
