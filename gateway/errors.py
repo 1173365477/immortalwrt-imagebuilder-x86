@@ -6,6 +6,10 @@ from enum import StrEnum
 
 
 class ErrorCode(StrEnum):
+    ANALYSIS_NOT_FOUND = "ANALYSIS_NOT_FOUND"
+    ANALYSIS_EXPIRED = "ANALYSIS_EXPIRED"
+    ANALYSIS_MISMATCH = "ANALYSIS_MISMATCH"
+    ANALYSIS_UNAVAILABLE = "ANALYSIS_UNAVAILABLE"
     AUTH_REQUIRED = "AUTH_REQUIRED"
     AUTH_INVALID = "AUTH_INVALID"
     AUTH_EXPIRED = "AUTH_EXPIRED"
@@ -31,6 +35,10 @@ class ErrorCode(StrEnum):
 
 
 PUBLIC_MESSAGES = {
+    ErrorCode.ANALYSIS_NOT_FOUND: "The requested evidence was not found.",
+    ErrorCode.ANALYSIS_EXPIRED: "The requested evidence has expired.",
+    ErrorCode.ANALYSIS_MISMATCH: "The requested evidence did not match.",
+    ErrorCode.ANALYSIS_UNAVAILABLE: "Analysis is temporarily unavailable.",
     ErrorCode.AUTH_REQUIRED: "Authentication is required.",
     ErrorCode.AUTH_INVALID: "Authentication failed.",
     ErrorCode.AUTH_EXPIRED: "Authentication failed.",

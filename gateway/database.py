@@ -196,6 +196,19 @@ class GatewayStore:
                         metadata_json TEXT NOT NULL,
                         verified_at INTEGER NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS admitted_snapshots (
+                        snapshot_ref TEXT PRIMARY KEY,
+                        device_id TEXT NOT NULL,
+                        snapshot_id TEXT NOT NULL,
+                        snapshot_sha256 TEXT NOT NULL,
+                        scan_generation TEXT NOT NULL,
+                        collected_at INTEGER NOT NULL,
+                        admitted_at INTEGER NOT NULL,
+                        expires_at INTEGER NOT NULL,
+                        payload BLOB,
+                        UNIQUE(device_id, snapshot_sha256),
+                        UNIQUE(device_id, scan_generation)
+                    );
                     INSERT INTO gateway_meta(key, value) VALUES('schema_version', '3')
                         ON CONFLICT(key) DO NOTHING;
                     COMMIT;
@@ -265,6 +278,85 @@ class GatewayStore:
         except ValueError as exc:
             raise GatewayError(ErrorCode.INTERNAL_ERROR, 500) from exc
         return f"gw-{value.hex}"
+
+    def admit_snapshot(self, raw: bytes, record: bytes, key: bytes, *, ttl: int) -> str:
+        from .admission import verify_collector_record
+
+        if ttl <= 0:
+            raise ValueError("invalid snapshot TTL")
+        claims = verify_collector_record(raw, record, key)
+        device_id = claims["device_id"]
+        sha = claims["snapshot_sha256"]
+        generation = claims["scan_generation"]
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                now = int(time.time())
+                enrolled = connection.execute(
+                    """SELECT 1 FROM device_credentials WHERE device_id=?
+                       AND revoked_at IS NULL AND expires_at>? LIMIT 1""", (device_id, now)
+                ).fetchone()
+                if enrolled is None:
+                    raise GatewayError(ErrorCode.ACCESS_DENIED, 403)
+                collected = claims["collected_at"]
+                existing = connection.execute(
+                    """SELECT snapshot_ref, snapshot_sha256, scan_generation, collected_at,
+                              expires_at, payload IS NOT NULL AS retained
+                       FROM admitted_snapshots WHERE device_id=?
+                         AND (snapshot_sha256=? OR scan_generation=?)""",
+                    (device_id, sha, generation),
+                ).fetchall()
+                if existing:
+                    row = existing[0]
+                    if (len(existing) != 1 or row["snapshot_sha256"] != sha
+                            or row["scan_generation"] != generation or row["collected_at"] != collected):
+                        raise GatewayError(ErrorCode.ANALYSIS_MISMATCH, 409)
+                    if not row["retained"] or now >= row["expires_at"]:
+                        raise GatewayError(ErrorCode.ANALYSIS_EXPIRED, 410)
+                    return row["snapshot_ref"]
+                expiry = collected + ttl
+                if collected > now:
+                    raise GatewayError(ErrorCode.ACCESS_DENIED, 403)
+                if now >= expiry:
+                    raise GatewayError(ErrorCode.ANALYSIS_EXPIRED, 410)
+                ref = secrets.token_hex(24)
+                connection.execute(
+                    """INSERT INTO admitted_snapshots
+                       (snapshot_ref, device_id, snapshot_id, snapshot_sha256, scan_generation,
+                        collected_at, admitted_at, expires_at, payload)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (ref, device_id, claims["snapshot_id"], sha, generation, collected,
+                     now, expiry, raw),
+                )
+                return ref
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def get_admitted_snapshot(self, device_id: str, ref: str) -> sqlite3.Row:
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT * FROM admitted_snapshots WHERE device_id=? AND snapshot_ref=?",
+                    (device_id, ref),
+                ).fetchone()
+                if row is None:
+                    raise GatewayError(ErrorCode.ANALYSIS_NOT_FOUND, 404)
+                if row["payload"] is None or row["expires_at"] <= int(time.time()):
+                    raise GatewayError(ErrorCode.ANALYSIS_EXPIRED, 410)
+                return row
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
+
+    def purge_expired_snapshots(self) -> int:
+        """Clear expired payloads while keeping permanent per-device replay tombstones."""
+        try:
+            with self._connect() as connection:
+                return connection.execute(
+                    """UPDATE admitted_snapshots SET payload=NULL
+                       WHERE expires_at<=? AND payload IS NOT NULL""", (int(time.time()),)
+                ).rowcount
+        except sqlite3.Error as exc:
+            raise self._storage_error(exc) from exc
 
     def issue_credential(self, device_id: str, *, ttl_seconds: int, now: int | None = None) -> str:
         if not device_id or len(device_id) > 128 or ttl_seconds <= 0:
