@@ -16,3 +16,15 @@
 	.smart-upgrade-kv .td:first-child { padding-bottom: 0; }
 	.smart-upgrade-wide-table .tr { min-width: 48rem; }
 }
+
+.smart-upgrade-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: .5rem;
+}
+
+.smart-upgrade-actions select {
+	min-width: 0;
+	max-width: 100%;
+}

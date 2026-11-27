@@ -360,7 +360,10 @@ def test_rpc_lists_only_fixed_read_only_contract():
     )
     assert result.returncode == 0
     assert json.loads(result.stdout) == {
-        "status": {}, "scan": {}, "snapshot": {}, "plan": {}, "report": {}
+        "status": {}, "scan": {}, "snapshot": {}, "plan": {}, "report": {},
+        "targets": {}, "snapshot_identity": {},
+        "analyze": {"target_ref": "string", "snapshot_id": "string",
+                    "scan_generation": "string", "snapshot_sha256": "string"},
     }
 
 
@@ -1092,9 +1095,16 @@ def test_model_displays_server_package_decisions_without_reclassifying():
 
 
 def test_acl_separates_read_methods_from_scan_permission():
-    acl = json.loads(ACL.read_text(encoding="utf-8"))["luci-app-smart-upgrade"]
-    assert acl["read"]["ubus"]["smart_upgrade"] == ["status", "snapshot", "plan", "report"]
+    policy = json.loads(ACL.read_text(encoding="utf-8"))
+    acl = policy["luci-app-smart-upgrade"]
+    assert acl["read"]["ubus"]["smart_upgrade"] == [
+        "status", "snapshot", "plan", "report", "snapshot_identity", "targets",
+    ]
     assert acl["write"]["ubus"]["smart_upgrade"] == ["scan"]
+    analysis = policy["luci-app-smart-upgrade-analysis"]
+    assert "read" not in analysis
+    assert analysis["write"] == {"ubus": {"smart_upgrade": ["analyze"]}}
+    assert {key for key in analysis} == {"description", "write"}
 
 
 def test_package_and_menu_use_native_luci_install_contract():
@@ -1127,8 +1137,43 @@ def test_frontend_surfaces_rpc_permission_and_transport_errors():
 
 
 def test_luci_javascript_is_syntax_valid():
-    for path in (MODEL, VIEW):
+    for path in (MODEL, VIEW, MODEL.with_name("remote.js")):
         result = subprocess.run(
             ["node", "--check", str(path)], capture_output=True, text=True, timeout=10,
         )
         assert result.returncode == 0, result.stderr
+
+
+def test_remote_rpc_reads_verified_file_identity_and_rechecks_current_scan(rpc_harness):
+    state, _, _, _, env, invoke = rpc_harness
+    helper = state.parent / "controlled-gateway"
+    observed = state.parent / "helper-call"
+    change = state.parent / "change-during-analysis"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\nfrom pathlib import Path\n"
+        f"Path({str(observed)!r}).write_text(json.dumps([sys.argv[1:], json.load(sys.stdin)]))\n"
+        f"if Path({str(change)!r}).exists(): Path({str(state / 'current-snapshot')!r}).unlink()\n"
+        "print(json.dumps({'available': True,'flash_ready':False,'dispatch_allowed':False}))\n"
+    )
+    helper.chmod(0o700)
+    env["SMART_UPGRADE_GATEWAY_CLIENT"] = str(helper)
+    assert invoke("analyze")["error_code"] == "SNAPSHOT_UNVERIFIED"
+    assert not observed.exists()
+    assert invoke("targets")["available"] is True
+    assert json.loads(observed.read_text()) == [["targets"], {}]
+    assert invoke("scan")["scan_status"] == "partial"
+    result = invoke("snapshot_identity")
+    assert result["available"] and result["integrity_status"] == "verified"
+    assert result["snapshot_sha256"] == hashlib.sha256(published_snapshot(state).read_bytes()).hexdigest()
+    assert "snapshot" not in result
+    params = {"target_ref": "d" * 48, **{key: result[key] for key in
+              ("snapshot_id", "scan_generation", "snapshot_sha256")}}
+    assert invoke("analyze", json.dumps(params))["available"]
+    assert json.loads(observed.read_text()) == [[
+        "analyze", result["snapshot_id"], result["scan_generation"], result["snapshot_sha256"],
+    ], params]
+    change.touch()
+    outcome = invoke("analyze", json.dumps(params))
+    assert outcome["error_code"] == "SNAPSHOT_CHANGED"
+    assert outcome["dispatch_allowed"] is outcome["flash_ready"] is False

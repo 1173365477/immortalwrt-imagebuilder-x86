@@ -1,0 +1,288 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-2.0-only
+"""Server-only transport for the two Smart Upgrade Gateway readout methods."""
+
+import http.client
+import json
+import os
+import re
+import signal
+import ssl
+import stat
+import sys
+import time
+from urllib.parse import urlsplit
+
+DIRECTORY = "/etc/smart-upgrade"
+CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+MAX_REPLY = 32 * 1024
+DEADLINE = 15
+FLAGS = {"dispatch_allowed": False, "flash_ready": False}
+HEX = re.compile(r"[a-f0-9]{64}")
+REF = re.compile(r"[a-f0-9]{48}")
+ID = re.compile(r"urn:sha256:[a-f0-9]{64}")
+GENERATION = re.compile(r"[a-f0-9]{64}-[1-9][0-9]{0,11}-[1-9][0-9]{0,9}")
+TOKEN = re.compile(r"[a-f0-9]{32}\.[A-Za-z0-9_-]{43}")
+MACHINE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}")
+HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?")
+BLOCKERS = {
+    "STRICT_PLAN_BLOCKED", "SNAPSHOT_INCOMPLETE", "SYSTEM_IDENTITY_UNVERIFIED",
+    "BOOT_MODE_UNVERIFIED", "TARGET_COMPATIBILITY_UNVERIFIED",
+    "PACKAGE_EVIDENCE_UNVERIFIED", "THIRDPARTY_EVIDENCE_UNVERIFIED",
+}
+RISK = {"same_physical_disk", "different_physical_disk", "unknown"}
+COUNTS = {"installed", "keep", "replace", "skip", "review", "block"}
+MESSAGES = {
+    "INVALID_REQUEST": "Invalid Gateway RPC parameters",
+    "GATEWAY_UNAVAILABLE": "Gateway is unavailable",
+    "GATEWAY_POLICY": "Gateway rejected the request",
+    "GATEWAY_LIMITED": "Gateway request limit reached",
+    "GATEWAY_RESPONSE_INVALID": "Gateway response could not be verified",
+    "SNAPSHOT_REFERENCE_UNAVAILABLE": "No current device-bound Snapshot reference is available",
+    "TARGET_EVIDENCE_UNAVAILABLE": "No current verified target is available",
+}
+
+
+class Unavailable(Exception):
+    pass
+
+
+def strict_json(raw):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    def constant(_):
+        raise ValueError("invalid JSON constant")
+
+    obj = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant)
+    if not isinstance(obj, dict):
+        raise ValueError("expected JSON object")
+    return obj
+
+
+def read_private(directory, name):
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    folder = os.open(directory, flags | os.O_DIRECTORY)
+    try:
+        info = os.fstat(folder)
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ValueError("invalid private directory")
+        with os.fdopen(os.open(name, flags, dir_fd=folder), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) not in {0o400, 0o600}
+                    or info.st_size > 4096):
+                raise ValueError("invalid private file")
+            raw = stream.read(4097)
+            if len(raw) > 4096:
+                raise ValueError("private file exceeds limit")
+            return strict_json(raw)
+    finally:
+        os.close(folder)
+
+
+def matches(pattern, value):
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def epoch(value):
+    return type(value) is int and 0 < value < 253402300799
+
+
+def origin(url):
+    if not isinstance(url, str) or not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/?", url):
+        raise ValueError("expected HTTPS origin")
+    parts = urlsplit(url)
+    if not matches(HOST, parts.hostname) or parts.port == 0:
+        raise ValueError("invalid HTTPS origin")
+    return parts.hostname, parts.port or 443
+
+
+def bound_reference(directory, device, subject):
+    try:
+        binding = read_private(directory, "snapshot-ref.json")
+        if (set(binding) != {"device_id", "snapshot_ref", "expires_at", *subject}
+                or binding["device_id"] != device
+                or not all(binding[key] == value for key, value in subject.items())
+                or not matches(REF, binding["snapshot_ref"])
+                or not epoch(binding["expires_at"]) or binding["expires_at"] <= time.time()):
+            raise ValueError("invalid binding")
+        return binding
+    except (OSError, ValueError, RecursionError):
+        raise Unavailable("SNAPSHOT_REFERENCE_UNAVAILABLE") from None
+
+
+def exchange(endpoint, bearer, path, data):
+    # Direct HTTPS, with checked hostname, system CA bundle and no redirect or proxy.
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(cafile=CA_BUNDLE)
+    connection = http.client.HTTPSConnection(*endpoint, timeout=DEADLINE, context=context)
+    headers = {"Authorization": f"Bearer {bearer}", "Accept": "application/json"}
+    try:
+        if data is None:
+            connection.request("GET", path, headers=headers)
+        else:
+            headers["Content-Type"] = "application/json"
+            connection.request("POST", path, body=json.dumps(data), headers=headers)
+        response = connection.getresponse()
+        if response.status != 200:
+            if path == "/analysis" and response.status in {404, 409, 410}:
+                raise Unavailable("TARGET_EVIDENCE_UNAVAILABLE")
+            if response.status in {401, 403}:
+                raise Unavailable("GATEWAY_POLICY")
+            if response.status == 429:
+                raise Unavailable("GATEWAY_LIMITED")
+            raise Unavailable("GATEWAY_UNAVAILABLE")
+        if (response.headers.get_content_type() != "application/json"
+                or response.getheader("Content-Encoding", "identity").lower() != "identity"
+                or response.length is not None and response.length > MAX_REPLY):
+            raise Unavailable("GATEWAY_RESPONSE_INVALID")
+        raw = response.read(MAX_REPLY + 1)
+        if len(raw) > MAX_REPLY or response.length not in (None, 0):
+            raise Unavailable("GATEWAY_RESPONSE_INVALID")
+        try:
+            return strict_json(raw)
+        except (ValueError, RecursionError):
+            raise Unavailable("GATEWAY_RESPONSE_INVALID") from None
+    finally:
+        connection.close()
+
+
+def target_output(reply):
+    rows = reply.get("targets")
+    if not isinstance(rows, list) or not 0 < len(rows) <= 16:
+        raise ValueError("invalid target catalog")
+    now = time.time()
+    targets = []
+    refs = set()
+    for row in rows:
+        text = ("version", "profile", "filesystem", "image_type", "architecture")
+        if (not isinstance(row, dict) or not all(matches(MACHINE, row.get(key)) for key in text)
+                or row.get("distribution") not in ("immortalwrt", "openwrt")
+                or not matches(re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"), row.get("target"))
+                or row.get("package_manager") not in ("apk", "opkg")
+                or not matches(REF, row.get("target_ref")) or row["target_ref"] in refs
+                or not matches(HEX, row.get("resolution_digest"))
+                or not epoch(row.get("verified_at")) or not epoch(row.get("expires_at"))
+                or not row["verified_at"] < row["expires_at"]):
+            raise ValueError("invalid target evidence")
+        refs.add(row["target_ref"])
+        if row["expires_at"] > now:
+            targets.append({key: row[key] for key in (
+                *text, "distribution", "target", "package_manager", "target_ref",
+                "resolution_digest", "verified_at", "expires_at",
+            )})
+    if not targets:
+        raise Unavailable("TARGET_EVIDENCE_UNAVAILABLE")
+    return {"targets": targets}
+
+
+def analysis_output(reply, subject, binding):
+    if (not all(reply.get(key) == value for key, value in subject.items())
+            or not epoch(reply.get("expires_at")) or reply["expires_at"] <= time.time()
+            or binding["expires_at"] <= time.time()
+            or not matches(HEX, reply.get("resolution_digest"))):
+        raise Unavailable("TARGET_EVIDENCE_UNAVAILABLE")
+    counts = reply.get("package_summary")
+    blockers = reply.get("blockers")
+    risk = reply.get("storage_risk")
+    status = reply.get("status")
+    if (status not in ("eligible", "blocked") or not isinstance(blockers, list)
+            or len(blockers) > len(BLOCKERS)
+            or any(not isinstance(code, str) or code not in BLOCKERS for code in blockers)
+            or len(set(blockers)) != len(blockers) or bool(blockers) != (status == "blocked")
+            or not isinstance(counts, dict) or set(counts) != COUNTS
+            or any(type(count) is not int or not 0 <= count <= 4096 for count in counts.values())
+            or counts["installed"] != sum(counts[key] for key in COUNTS - {"installed"})
+            or not isinstance(risk, dict)
+            or risk.get("status") not in ("ok", "partial", "blocked", "failed", "unknown")
+            or type(risk.get("docker_present")) is not bool
+            or not isinstance(risk.get("firmware_overwrite_risks"), list)
+            or len(risk["firmware_overwrite_risks"]) > len(RISK)
+            or any(not isinstance(value, str) or value not in RISK
+                   for value in risk["firmware_overwrite_risks"])):
+        raise ValueError("invalid analysis result")
+    return {
+        **subject, "status": status, "blockers": blockers, "package_summary": counts,
+        "storage_risk": {key: risk[key] for key in ("status", "docker_present", "firmware_overwrite_risks")},
+        "resolution_digest": reply["resolution_digest"],
+        "expires_at": min(reply["expires_at"], binding["expires_at"]),
+    }
+
+
+def invoke(method, subject, raw, directory):
+    try:
+        params = strict_json(raw)
+        # uhttpd attaches the authenticated ubus session before rpcd invokes us.
+        session = params.pop("ubus_rpc_session", None)
+        if session is not None and not matches(re.compile(r"[a-f0-9]{32}"), session):
+            raise ValueError("invalid session envelope")
+        expected = set() if method == "targets" else {"target_ref", *subject}
+        if (set(params) != expected or method == "analyze"
+                and not matches(REF, params["target_ref"])):
+            raise ValueError("unexpected parameter")
+    except (ValueError, RecursionError):
+        raise Unavailable("INVALID_REQUEST") from None
+
+    config = read_private(directory, "gateway.json")
+    if (set(config) != {"url", "device_id", "bearer"}
+            or not matches(MACHINE, config["device_id"]) or not matches(TOKEN, config["bearer"])):
+        raise ValueError("invalid Gateway configuration")
+    endpoint = origin(config["url"])
+    if method == "targets":
+        reply = exchange(endpoint, config["bearer"], "/targets", None)
+    else:
+        if (not matches(ID, subject.get("snapshot_id"))
+                or not matches(GENERATION, subject.get("scan_generation"))
+                or not matches(HEX, subject.get("snapshot_sha256"))
+                or not all(params[key] == value for key, value in subject.items())):
+            raise Unavailable("SNAPSHOT_REFERENCE_UNAVAILABLE")
+        binding = bound_reference(directory, config["device_id"], subject)
+        reply = exchange(endpoint, config["bearer"], "/analysis", {
+            "snapshot_ref": binding["snapshot_ref"], "target_ref": params["target_ref"],
+        })
+    try:
+        if any(reply.get(key) is not False for key in FLAGS):
+            raise ValueError("invalid safety state")
+        result = target_output(reply) if method == "targets" else analysis_output(reply, subject, binding)
+        if config["bearer"] in json.dumps(result):
+            raise ValueError("private text in result")
+    except ValueError:
+        raise Unavailable("GATEWAY_RESPONSE_INVALID") from None
+    return {"available": True, **FLAGS, **result}
+
+
+def error(code):
+    return {"available": False, **FLAGS, "error_code": code, "error_message": MESSAGES[code]}
+
+
+def expire(_signal, _frame):
+    raise TimeoutError("Gateway operation expired")
+
+
+def main():
+    signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, DEADLINE)
+    try:
+        method = sys.argv[1] if len(sys.argv) > 1 else ""
+        subject = dict(zip(("snapshot_id", "scan_generation", "snapshot_sha256"), sys.argv[2:]))
+        raw = sys.stdin.buffer.read(2049)
+        if len(raw) > 2048 or (method, len(sys.argv)) not in {("targets", 2), ("analyze", 5)}:
+            raise Unavailable("INVALID_REQUEST")
+        result = invoke(method, subject, raw, DIRECTORY)
+    except Unavailable as exc:
+        result = error(str(exc))
+    except (OSError, ValueError, RecursionError, http.client.HTTPException):
+        result = error("GATEWAY_UNAVAILABLE")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    print(json.dumps(result, separators=(",", ":")))
+
+
+if __name__ == "__main__":
+    main()

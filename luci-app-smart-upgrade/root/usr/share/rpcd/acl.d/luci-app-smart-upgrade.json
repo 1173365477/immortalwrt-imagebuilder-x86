@@ -3,12 +3,20 @@
 		"description": "View read-only Smart Upgrade evidence and start a read-only scan",
 		"read": {
 			"ubus": {
-				"smart_upgrade": [ "status", "snapshot", "plan", "report" ]
+				"smart_upgrade": [ "status", "snapshot", "plan", "report", "snapshot_identity", "targets" ]
 			}
 		},
 		"write": {
 			"ubus": {
 				"smart_upgrade": [ "scan" ]
+			}
+		}
+	},
+	"luci-app-smart-upgrade-analysis": {
+		"description": "Request a read-only migration analysis on the configured Gateway",
+		"write": {
+			"ubus": {
+				"smart_upgrade": [ "analyze" ]
 			}
 		}
 	}
