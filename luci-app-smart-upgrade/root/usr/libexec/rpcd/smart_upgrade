@@ -1,0 +1,662 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# rpcd exec provider for fixed, read-only Smart Upgrade operations.
+set -eu
+
+umask 077
+LC_ALL=C
+export LC_ALL
+
+STATE_DIR=${SMART_UPGRADE_STATE_DIR:-/tmp/smart-upgrade}
+AGENT=${SMART_UPGRADE_AGENT:-/usr/libexec/smart-upgrade/smart-upgrade-agent}
+JSONFILTER=${SMART_UPGRADE_JSONFILTER:-jsonfilter}
+JSHN_LIBRARY=${SMART_UPGRADE_JSHN_LIBRARY:-/usr/share/libubox/jshn.sh}
+SETSID=${SMART_UPGRADE_SETSID:-setsid}
+WORKER_SHELL=${SMART_UPGRADE_WORKER_SHELL:-/bin/sh}
+EXPECTED_UID=${SMART_UPGRADE_EXPECTED_UID:-0}
+PROC_ROOT=${SMART_UPGRADE_PROC_ROOT:-/proc}
+BOOT_ID_FILE=${SMART_UPGRADE_BOOT_ID_FILE:-$PROC_ROOT/sys/kernel/random/boot_id}
+SELF_START_TICKS=${SMART_UPGRADE_SELF_START_TICKS:-}
+SCAN_TIMEOUT=${SMART_UPGRADE_SCAN_TIMEOUT:-180}
+STATE=$STATE_DIR/scan-state.json
+LOCK=$STATE_DIR/scan.lock
+ACQUIRE_GATE=$STATE_DIR/scan.acquire
+ACQUIRE_MUTEX=$STATE_DIR/scan.acquire.mutex
+FLOCK=${SMART_UPGRADE_FLOCK:-flock}
+SNAPSHOT_ROOT=$STATE_DIR/snapshots
+ANALYSIS_ROOT=$STATE_DIR/analyses
+CURRENT_SNAPSHOT=$STATE_DIR/current-snapshot
+CURRENT_ANALYSIS=$STATE_DIR/current-analysis
+MAX_SNAPSHOT_BYTES=4194304
+MAX_PLAN_BYTES=8388608
+MAX_REPORT_BYTES=524288
+MAX_MANIFEST_BYTES=131072
+
+case "${1:-}" in
+list)
+	printf '%s\n' '{"status":{},"scan":{},"snapshot":{},"plan":{},"report":{}}'
+	exit 0
+	;;
+call|scan-worker) ;;
+*) exit 1 ;;
+esac
+
+[ -r "$JSHN_LIBRARY" ] || exit 1
+# shellcheck source=/dev/null
+. "$JSHN_LIBRARY"
+
+timestamp() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+epoch() { date -u '+%s'; }
+file_size() { wc -c < "$1" | tr -d ' '; }
+file_sha256() { sha256sum "$1" | awk '{print $1}'; }
+stat_uid() { stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1" 2>/dev/null; }
+stat_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
+json_value() { "$JSONFILTER" -i "$1" -e "$2" 2>/dev/null || true; }
+json_type() { "$JSONFILTER" -i "$1" -t "$2" 2>/dev/null || true; }
+
+emit_error() {
+	json_init
+	json_add_boolean available 0
+	json_add_string error_code "$1"
+	json_add_string error_message "$2"
+	json_add_boolean dispatch_allowed 0
+	json_add_boolean flash_ready 0
+	json_dump
+}
+
+safe_parent_directory() {
+	path=$1
+	[ -d "$path" ] && [ ! -L "$path" ] || return 1
+	[ "$(stat_uid "$path")" = "$EXPECTED_UID" ] || return 1
+	mode=$(stat_mode "$path")
+	case "$mode" in 700|710|711|750|751|755|1777) return 0 ;; *) return 1 ;; esac
+}
+
+safe_private_directory() {
+	path=$1
+	[ -d "$path" ] && [ ! -L "$path" ] || return 1
+	[ "$(stat_uid "$path")" = "$EXPECTED_UID" ] || return 1
+	[ "$(stat_mode "$path")" = 700 ] || return 1
+}
+
+ensure_private_directory() {
+	path=$1
+	if [ -e "$path" ] || [ -L "$path" ]; then
+		safe_private_directory "$path"
+		return
+	fi
+	mkdir "$path" 2>/dev/null || { safe_private_directory "$path"; return; }
+	safe_private_directory "$path"
+}
+
+safe_regular_file() {
+	path=$1
+	limit=$2
+	[ -f "$path" ] && [ ! -L "$path" ] || return 1
+	[ "$(stat_uid "$path")" = "$EXPECTED_UID" ] || return 1
+	mode=$(stat_mode "$path")
+	case "$mode" in 400|600) ;; *) return 1 ;; esac
+	size=$(file_size "$path")
+	case "$size" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$size" -le "$limit" ]
+}
+
+initialize_state() {
+	parent=${STATE_DIR%/*}
+	[ "$parent" != "$STATE_DIR" ] || parent=.
+	if ! safe_parent_directory "$parent"; then
+		emit_error STATE_PARENT_UNSAFE "Smart Upgrade state parent is not a trusted directory"
+		return 1
+	fi
+	if ! ensure_private_directory "$STATE_DIR"; then
+		emit_error STATE_DIRECTORY_UNSAFE "Smart Upgrade state path is not a private root-owned directory"
+		return 1
+	fi
+	if ! ensure_private_directory "$SNAPSHOT_ROOT" || ! ensure_private_directory "$ANALYSIS_ROOT"; then
+		emit_error STATE_DIRECTORY_UNSAFE "Smart Upgrade bundle directories are not private root-owned directories"
+		return 1
+	fi
+}
+
+write_state() {
+	state_tmp=$(mktemp "$STATE_DIR/.scan-state.XXXXXX")
+	json_init
+	json_add_string scan_status "$1"
+	json_add_string started_at "$2"
+	json_add_string completed_at "$3"
+	json_add_string snapshot_id "$4"
+	json_add_string snapshot_status "$5"
+	json_add_string error_code "$6"
+	json_add_string error_message "$7"
+	json_add_boolean dispatch_allowed 0
+	json_add_boolean flash_ready 0
+	json_dump > "$state_tmp"
+	mv -f "$state_tmp" "$STATE"
+}
+
+emit_idle_status() {
+	json_init
+	json_add_string scan_status idle
+	json_add_string started_at ""
+	json_add_string completed_at ""
+	json_add_string snapshot_id ""
+	json_add_string snapshot_status unknown
+	json_add_string error_code ""
+	json_add_string error_message ""
+	json_add_boolean dispatch_allowed 0
+	json_add_boolean flash_ready 0
+	json_dump
+}
+
+valid_time_or_empty() {
+	[ -z "$1" ] || printf '%s\n' "$1" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+}
+
+emit_status() {
+	if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then emit_idle_status; return; fi
+	if ! safe_regular_file "$STATE" 65536; then emit_error STATUS_UNSAFE "Scan status is not a trusted regular file"; return; fi
+	scan_status=$(json_value "$STATE" '@.scan_status')
+	started_at=$(json_value "$STATE" '@.started_at')
+	completed_at=$(json_value "$STATE" '@.completed_at')
+	status_snapshot_id=$(json_value "$STATE" '@.snapshot_id')
+	status_snapshot_status=$(json_value "$STATE" '@.snapshot_status')
+	error_code=$(json_value "$STATE" '@.error_code')
+	error_message=$(json_value "$STATE" '@.error_message')
+	case "$scan_status" in idle|running|completed|partial|failed) ;; *) emit_error STATUS_INVALID "Scan status JSON is invalid"; return ;; esac
+	case "$status_snapshot_status" in ok|partial|blocked|failed|unknown) ;; *) emit_error STATUS_INVALID "Snapshot status is invalid"; return ;; esac
+	if ! valid_time_or_empty "$started_at" || ! valid_time_or_empty "$completed_at"; then emit_error STATUS_INVALID "Scan timestamps are invalid"; return; fi
+	if [ -n "$status_snapshot_id" ] && ! printf '%s\n' "$status_snapshot_id" | grep -Eq '^urn:sha256:[a-f0-9]{64}$'; then emit_error STATUS_INVALID "Snapshot identity is invalid"; return; fi
+	if [ "$(printf '%s' "$error_code" | wc -c | tr -d ' ')" -gt 128 ] || [ "$(printf '%s' "$error_message" | wc -c | tr -d ' ')" -gt 1024 ]; then emit_error STATUS_INVALID "Scan error fields exceed their limits"; return; fi
+	json_init
+	json_add_string scan_status "$scan_status"
+	json_add_string started_at "$started_at"
+	json_add_string completed_at "$completed_at"
+	json_add_string snapshot_id "$status_snapshot_id"
+	json_add_string snapshot_status "$status_snapshot_status"
+	json_add_string error_code "$error_code"
+	json_add_string error_message "$error_message"
+	json_add_boolean dispatch_allowed 0
+	json_add_boolean flash_ready 0
+	json_dump
+}
+
+read_boot_id() {
+	[ -f "$BOOT_ID_FILE" ] && [ ! -L "$BOOT_ID_FILE" ] || return 1
+	IFS= read -r boot_id < "$BOOT_ID_FILE" || return 1
+	printf '%s\n' "$boot_id" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || return 1
+	printf '%s\n' "$boot_id"
+}
+
+process_start_ticks() {
+	pid=$1
+	case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+	if [ "$pid" = "$$" ] && [ -n "$SELF_START_TICKS" ]; then
+		printf '%s\n' "$SELF_START_TICKS" | grep -E '^[0-9]+$'
+		return
+	fi
+	stat_file=$PROC_ROOT/$pid/stat
+	[ -r "$stat_file" ] && [ ! -L "$stat_file" ] || return 1
+	sed 's/^.*) //' "$stat_file" | awk '{print $20}' | grep -E '^[0-9]+$'
+}
+
+write_owner() {
+	owner_directory=$1
+	owner_tmp=$(mktemp "$owner_directory/.owner.XXXXXX")
+	boot_id=$(read_boot_id) || return 1
+	start_ticks=$(process_start_ticks "$$") || return 1
+	json_init
+	json_add_string schema_version 1.0.0
+	json_add_string pid "$$"
+	json_add_string boot_id "$boot_id"
+	json_add_string process_start_ticks "$start_ticks"
+	json_add_string created_at "$(timestamp)"
+	json_dump > "$owner_tmp"
+	mv -f "$owner_tmp" "$owner_directory/owner.json"
+}
+
+valid_owner_fields() {
+	owner=$1
+	[ "$(json_type "$owner" '@.schema_version')" = string ] || return 1
+	[ "$(json_type "$owner" '@.pid')" = string ] || return 1
+	[ "$(json_type "$owner" '@.boot_id')" = string ] || return 1
+	[ "$(json_type "$owner" '@.process_start_ticks')" = string ] || return 1
+	[ "$(json_type "$owner" '@.created_at')" = string ] || return 1
+	[ "$(json_value "$owner" '@.schema_version')" = 1.0.0 ] || return 1
+	owner_pid=$(json_value "$owner" '@.pid')
+	owner_boot=$(json_value "$owner" '@.boot_id')
+	owner_ticks=$(json_value "$owner" '@.process_start_ticks')
+	owner_created=$(json_value "$owner" '@.created_at')
+	case "$owner_pid" in ''|*[!0-9]*) return 1 ;; esac
+	case "$owner_ticks" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s\n' "$owner_boot" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || return 1
+	[ -n "$owner_created" ] && valid_time_or_empty "$owner_created" || return 1
+}
+
+recover_stale_lock() {
+	ensure_private_directory "$STATE_DIR/recovered-locks" || { emit_error LOCK_UNVERIFIABLE "Recovered-lock audit directory is unsafe"; return 1; }
+	destination=$STATE_DIR/recovered-locks/lock-$(epoch)-$$
+	if mv "$LOCK" "$destination" 2>/dev/null; then
+		emit_error LOCK_RECOVERED "A proven stale scan lock was isolated; retry explicitly to start a scan"
+	else
+		emit_error SCAN_BUSY "Scan lock changed concurrently; retry later"
+	fi
+	return 1
+}
+
+inspect_existing_lock() {
+	if ! safe_private_directory "$LOCK"; then emit_error LOCK_UNVERIFIABLE "Scan lock is not a trusted private directory"; return 1; fi
+	owner=$LOCK/owner.json
+	if ! safe_regular_file "$owner" 8192; then emit_error LOCK_UNVERIFIABLE "Scan lock owner evidence is missing or unsafe"; return 1; fi
+	valid_owner_fields "$owner" || { emit_error LOCK_UNVERIFIABLE "Scan lock owner identity is incomplete or invalid"; return 1; }
+	inspect_owner_identity recover_stale_lock
+}
+
+recover_stale_gate() {
+	ensure_private_directory "$STATE_DIR/recovered-locks" || { emit_error LOCK_UNVERIFIABLE "Recovered-lock audit directory is unsafe"; return 1; }
+	destination=$STATE_DIR/recovered-locks/acquire-$(epoch)-$$
+	if mv "$ACQUIRE_GATE" "$destination" 2>/dev/null; then
+		emit_error LOCK_RECOVERED "A proven stale acquisition gate was isolated; retry explicitly to start a scan"
+	else
+		emit_error LOCK_UNVERIFIABLE "Unable to archive acquisition evidence"
+	fi
+	return 1
+}
+
+inspect_existing_gate() {
+	if ! safe_private_directory "$ACQUIRE_GATE"; then emit_error LOCK_UNVERIFIABLE "Scan acquisition gate is not a trusted private directory"; return 1; fi
+	owner=$ACQUIRE_GATE/owner.json
+	if ! safe_regular_file "$owner" 8192; then emit_error LOCK_UNVERIFIABLE "Scan acquisition owner evidence is missing or unsafe"; return 1; fi
+	valid_owner_fields "$owner" || { emit_error LOCK_UNVERIFIABLE "Scan acquisition owner identity is incomplete or invalid"; return 1; }
+	inspect_owner_identity recover_stale_gate
+}
+
+inspect_owner_identity() {
+	current_boot=$(read_boot_id) || { emit_error LOCK_UNVERIFIABLE "Current boot identity is unavailable"; return 1; }
+	if [ "$owner_boot" != "$current_boot" ]; then "$1"; return; fi
+	if current_ticks=$(process_start_ticks "$owner_pid"); then
+		if [ "$current_ticks" != "$owner_ticks" ]; then "$1"; return; fi
+	elif [ -d "$PROC_ROOT" ] && [ -x "$PROC_ROOT" ] && [ ! -e "$PROC_ROOT/$owner_pid" ]; then
+		"$1"
+		return
+	else
+		emit_error LOCK_UNVERIFIABLE "Current process identity cannot be verified"
+		return 1
+	fi
+	emit_error SCAN_BUSY "A read-only scan or acquisition is in progress"
+	return 1
+}
+
+acquire_lock_serialized() {
+	if [ -e "$ACQUIRE_GATE" ] || [ -L "$ACQUIRE_GATE" ]; then inspect_existing_gate; return 1; fi
+	if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then inspect_existing_lock; return 1; fi
+	# Publish the owner and directory together.
+	if ! pending_lock=$(mktemp -d "$STATE_DIR/.scan-lock.XXXXXX"); then
+		emit_error LOCK_UNVERIFIABLE "Cannot stage scan ownership"
+		return 1
+	fi
+	if write_owner "$pending_lock" && mv "$pending_lock" "$LOCK"; then return 0; fi
+	rm -f "$pending_lock/owner.json" "$pending_lock"/.owner.*
+	rmdir "$pending_lock" 2>/dev/null || true
+	emit_error LOCK_UNVERIFIABLE "Cannot establish verifiable scan ownership"
+	return 1
+}
+
+acquire_lock() {
+	command -v "$FLOCK" >/dev/null 2>&1 || { emit_error LOCK_UNVERIFIABLE "Kernel scan acquisition lock is unavailable"; return 1; }
+	# Keep the inode stable. The kernel releases the lock with the descriptor.
+	if [ -e "$ACQUIRE_MUTEX" ] || [ -L "$ACQUIRE_MUTEX" ]; then
+		safe_regular_file "$ACQUIRE_MUTEX" 0 || { emit_error LOCK_UNVERIFIABLE "Scan acquisition mutex is unsafe"; return 1; }
+	fi
+	exec 9>>"$ACQUIRE_MUTEX"
+	if "$FLOCK" -n 9; then
+		if acquire_lock_serialized; then result=0; else result=$?; fi
+	else
+		emit_error SCAN_BUSY "Another request is acquiring or recovering the scan lock"
+		result=1
+	fi
+	exec 9>&-
+	return "$result"
+}
+
+release_lock() {
+	if safe_private_directory "$LOCK" && safe_regular_file "$LOCK/owner.json" 8192 && [ "$(json_value "$LOCK/owner.json" '@.pid')" = "$$" ]; then
+		rm -f "$LOCK/owner.json"
+		rmdir "$LOCK" 2>/dev/null || true
+	fi
+}
+
+validate_snapshot() {
+	[ -s "$1" ] || return 1
+	[ "$(file_size "$1")" -le "$MAX_SNAPSHOT_BYTES" ] || return 1
+	[ "$(json_value "$1" '@.schema_version')" = 1.0.0 ] || return 1
+	[ "$(json_value "$1" '@.privacy_mode')" = redacted ] || return 1
+	[ "$(json_value "$1" '@.digest.algorithm')" = sha256 ] || return 1
+	[ "$(json_value "$1" '@.digest.canonicalization')" = evidence-sha256-v2 ] || return 1
+	snapshot_id=$(json_value "$1" '@.snapshot_id')
+	digest=$(json_value "$1" '@.digest.value')
+	case "$snapshot_id" in "urn:sha256:$digest") ;; *) return 1 ;; esac
+	printf '%s\n' "$digest" | grep -Eq '^[a-f0-9]{64}$' || return 1
+	snapshot_status=$(json_value "$1" '@.status')
+	case "$snapshot_status" in ok|partial|blocked|failed|unknown) ;; *) return 1 ;; esac
+}
+
+write_snapshot_manifest() {
+	manifest=$1
+	snapshot_path=$2
+	json_init
+	json_add_string schema_version 1.0.0
+	json_add_string producer smart-upgrade-agent
+	json_add_string producer_version 1
+	json_add_string created_at "$(timestamp)"
+	json_add_string snapshot_id "$snapshot_id"
+	json_add_string evidence_digest "$digest"
+	json_add_string snapshot_file_sha256 "$(file_sha256 "$snapshot_path")"
+	json_add_string privacy_mode redacted
+	json_add_boolean dispatch_allowed 0
+	json_add_boolean flash_ready 0
+	json_dump > "$manifest"
+}
+
+run_agent_bounded() {
+	output=$1; errors=$2; marker=$3
+	case "$SCAN_TIMEOUT" in ''|*[!0-9]*) return 125 ;; esac
+	[ "$SCAN_TIMEOUT" -ge 1 ] && [ "$SCAN_TIMEOUT" -le 180 ] || return 125
+	command -v "$SETSID" >/dev/null 2>&1 || return 125
+	RUN_RESULT_FILE=$(mktemp "$STATE_DIR/.scan-result.XXXXXX")
+	rm -f "$RUN_RESULT_FILE"
+	# Positional parameters are deliberately expanded by the child shell.
+	# shellcheck disable=SC2016
+	"$SETSID" sh -c '
+		if "$1" --privacy redacted > "$2" 2> "$3"; then result=0; else result=$?; fi
+		printf "%s\n" "$result" > "$4"
+		exit "$result"
+	' sh "$AGENT" "$output" "$errors" "$RUN_RESULT_FILE" &
+	ACTIVE_AGENT_GROUP=$!
+	elapsed=0
+	while [ ! -s "$RUN_RESULT_FILE" ]; do
+		if ! kill -0 "$ACTIVE_AGENT_GROUP" 2>/dev/null; then
+			[ ! -s "$RUN_RESULT_FILE" ] || break
+			kill -KILL "-$ACTIVE_AGENT_GROUP" 2>/dev/null || true
+			wait "$ACTIVE_AGENT_GROUP" 2>/dev/null || true
+			ACTIVE_AGENT_GROUP=""
+			rm -f "$RUN_RESULT_FILE"
+			RUN_RESULT_FILE=""
+			return 125
+		fi
+		if [ "$elapsed" -ge "$SCAN_TIMEOUT" ]; then
+			printf '%s\n' timeout > "$marker"
+			kill -TERM "-$ACTIVE_AGENT_GROUP" 2>/dev/null || true
+			sleep 2
+			kill -KILL "-$ACTIVE_AGENT_GROUP" 2>/dev/null || true
+			wait "$ACTIVE_AGENT_GROUP" 2>/dev/null || true
+			ACTIVE_AGENT_GROUP=""
+			rm -f "$RUN_RESULT_FILE"
+			RUN_RESULT_FILE=""
+			return 124
+		fi
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+	IFS= read -r agent_result < "$RUN_RESULT_FILE" || agent_result=125
+	rm -f "$RUN_RESULT_FILE"
+	RUN_RESULT_FILE=""
+	wait "$ACTIVE_AGENT_GROUP" 2>/dev/null || true
+	ACTIVE_AGENT_GROUP=""
+	case "$agent_result" in ''|*[!0-9]*) return 125 ;; esac
+	return "$agent_result"
+}
+
+run_scan() {
+	if ! acquire_lock; then return; fi
+	started=$(timestamp)
+	bundle_tmp=$(mktemp -d "$SNAPSHOT_ROOT/.pending.XXXXXX")
+	snapshot_tmp=$bundle_tmp/system-snapshot-v1.json
+	manifest_tmp=$bundle_tmp/snapshot-integrity-v1.json
+	err_tmp=$(mktemp "$STATE_DIR/.scan-error.XXXXXX")
+	timeout_marker=$(mktemp "$STATE_DIR/.scan-timeout.XXXXXX")
+	ACTIVE_AGENT_GROUP=""
+	RUN_RESULT_FILE=""
+	# Invoked by the scan worker's EXIT trap.
+	# shellcheck disable=SC2317
+	cleanup_scan() {
+		if [ -n "$ACTIVE_AGENT_GROUP" ]; then
+			kill -TERM "-$ACTIVE_AGENT_GROUP" 2>/dev/null || true
+			kill -KILL "-$ACTIVE_AGENT_GROUP" 2>/dev/null || true
+			wait "$ACTIVE_AGENT_GROUP" 2>/dev/null || true
+		fi
+		[ -z "$RUN_RESULT_FILE" ] || rm -f "$RUN_RESULT_FILE"
+		rm -f "$err_tmp" "$timeout_marker"
+		if [ -n "${bundle_tmp:-}" ] && [ -d "$bundle_tmp" ]; then
+			rm -f "$bundle_tmp/system-snapshot-v1.json" "$bundle_tmp/snapshot-integrity-v1.json"
+			rmdir "$bundle_tmp" 2>/dev/null || true
+		fi
+		release_lock
+	}
+	trap cleanup_scan EXIT
+	trap 'exit 143' HUP INT TERM
+	write_state running "$started" "" "" unknown "" ""
+	if run_agent_bounded "$snapshot_tmp" "$err_tmp" "$timeout_marker"; then agent_result=0; else agent_result=$?; fi
+	case "$agent_result" in
+		0) ;;
+		124) write_state failed "$started" "$(timestamp)" "" failed SCAN_TIMEOUT "The read-only scan exceeded the 180 second deadline"; emit_status; return ;;
+		125) write_state failed "$started" "$(timestamp)" "" failed SCAN_RUNTIME_UNAVAILABLE "The bounded scan supervisor is unavailable"; emit_status; return ;;
+		*) write_state failed "$started" "$(timestamp)" "" failed SCAN_FAILED "The fixed read-only scanner failed"; emit_status; return ;;
+	esac
+	if ! validate_snapshot "$snapshot_tmp"; then
+		write_state failed "$started" "$(timestamp)" "" failed SNAPSHOT_INVALID "Scanner output failed the snapshot identity checks"
+		emit_status
+		return
+	fi
+	write_snapshot_manifest "$manifest_tmp" "$snapshot_tmp"
+	chmod 0600 "$snapshot_tmp" "$manifest_tmp"
+	snapshot_manifest_seal=$(file_sha256 "$manifest_tmp")
+	generation=$digest-$(epoch)-$$
+	final_bundle=$SNAPSHOT_ROOT/$generation
+	mv "$bundle_tmp" "$final_bundle"
+	bundle_tmp=""
+	pointer_tmp=$(mktemp "$STATE_DIR/.current-snapshot.XXXXXX")
+	printf '%s %s\n' "$generation" "$snapshot_manifest_seal" > "$pointer_tmp"
+	mv -f "$pointer_tmp" "$CURRENT_SNAPSHOT"
+	case "$snapshot_status" in ok) scan_status=completed ;; failed) scan_status=failed ;; *) scan_status=partial ;; esac
+	write_state "$scan_status" "$started" "$(timestamp)" "$snapshot_id" "$snapshot_status" "" ""
+	emit_status
+}
+
+request_scan() {
+	# rpcd may SIGKILL this request process before the scan deadline. The
+	# worker owns the scan lock and its output is independent of rpcd pipes.
+	if ! reply=$(mktemp "$STATE_DIR/.scan-reply.XXXXXX"); then
+		emit_error SCAN_RUNTIME_UNAVAILABLE "Cannot create a private scan reply"
+		return
+	fi
+	# Read the reply only after wait confirms the writer has finished.
+	# shellcheck disable=SC2094
+	{
+		if ! rm -f "$reply"; then
+			emit_error SCAN_RUNTIME_UNAVAILABLE "Cannot unlink the private scan reply"
+			return
+		fi
+		"$WORKER_SHELL" "$0" scan-worker </dev/null >&4 2>/dev/null 3<&- 4>&- &
+		scan_worker=$!
+		trap 'kill -TERM "$scan_worker" 2>/dev/null || true; wait "$scan_worker" 2>/dev/null || true; exit 143' HUP INT TERM
+		if wait "$scan_worker"; then
+			cat <&3
+		else
+			emit_error SCAN_RUNTIME_UNAVAILABLE "Scan worker exited unexpectedly"
+		fi
+		trap - HUP INT TERM
+	} 3<"$reply" 4>"$reply"
+}
+
+read_pointer() {
+	pointer=$1; pattern=$2
+	safe_regular_file "$pointer" 256 || return 1
+	IFS= read -r value < "$pointer" || return 1
+	printf '%s\n' "$value" | grep -Eq "$pattern" || return 1
+	printf '%s\n' "$value"
+}
+
+load_snapshot_bundle() {
+	snapshot_pointer=$(read_pointer "$CURRENT_SNAPSHOT" '^[a-f0-9]{64}-[0-9]+-[0-9]+ [a-f0-9]{64}$') || return 1
+	generation=${snapshot_pointer%% *}
+	snapshot_manifest_seal=${snapshot_pointer#* }
+	bundle=$SNAPSHOT_ROOT/$generation
+	safe_private_directory "$bundle" || return 1
+	SNAPSHOT=$bundle/system-snapshot-v1.json
+	SNAPSHOT_MANIFEST=$bundle/snapshot-integrity-v1.json
+	safe_regular_file "$SNAPSHOT" "$MAX_SNAPSHOT_BYTES" || return 1
+	safe_regular_file "$SNAPSHOT_MANIFEST" "$MAX_MANIFEST_BYTES" || return 1
+	[ "$(file_sha256 "$SNAPSHOT_MANIFEST")" = "$snapshot_manifest_seal" ] || return 1
+	validate_snapshot "$SNAPSHOT" || return 1
+	[ "$(json_value "$SNAPSHOT_MANIFEST" '@.schema_version')" = 1.0.0 ] || return 1
+	[ "$(json_value "$SNAPSHOT_MANIFEST" '@.producer')" = smart-upgrade-agent ] || return 1
+	[ "$(json_value "$SNAPSHOT_MANIFEST" '@.producer_version')" = 1 ] || return 1
+	[ "$(json_value "$SNAPSHOT_MANIFEST" '@.snapshot_id')" = "$snapshot_id" ] || return 1
+	[ "$(json_value "$SNAPSHOT_MANIFEST" '@.evidence_digest')" = "$digest" ] || return 1
+	[ "$(json_value "$SNAPSHOT_MANIFEST" '@.privacy_mode')" = redacted ] || return 1
+	[ "$(json_value "$SNAPSHOT_MANIFEST" '@.dispatch_allowed')" = false ] || return 1
+	[ "$(json_value "$SNAPSHOT_MANIFEST" '@.flash_ready')" = false ] || return 1
+	SNAPSHOT_FILE_SHA=$(file_sha256 "$SNAPSHOT")
+	[ "$(json_value "$SNAPSHOT_MANIFEST" '@.snapshot_file_sha256')" = "$SNAPSHOT_FILE_SHA" ] || return 1
+	[ "$(read_pointer "$CURRENT_SNAPSHOT" '^[a-f0-9]{64}-[0-9]+-[0-9]+ [a-f0-9]{64}$')" = "$snapshot_pointer" ] || return 1
+}
+
+emit_snapshot() {
+	if ! load_snapshot_bundle; then emit_error SNAPSHOT_UNVERIFIED "No byte-verified read-only system snapshot is available"; return; fi
+	printf '{"available":true,"integrity_status":"verified","dispatch_allowed":false,"flash_ready":false,"snapshot_generation":"%s","snapshot":' "${snapshot_pointer%% *}"
+	cat "$SNAPSHOT"
+	printf '%s\n' '}'
+}
+
+validate_plan() {
+	[ "$(json_value "$PLAN" '@.schema_version')" = 1.0.0 ] || return 1
+	plan_id=$(json_value "$PLAN" '@.plan_id')
+	plan_digest=$(json_value "$PLAN" '@.digest')
+	plan_snapshot_id=$(json_value "$PLAN" '@.source_snapshot_id')
+	plan_snapshot_digest=$(json_value "$PLAN" '@.source_snapshot_digest')
+	[ "$(json_value "$PLAN" '@.privacy_mode')" = redacted ] || return 1
+	printf '%s\n' "$plan_digest" | grep -Eq '^[a-f0-9]{64}$' || return 1
+	[ "$plan_id" = "urn:sha256:$plan_digest" ] || return 1
+	[ "$(json_value "$PLAN" '@.flash_ready')" = false ] || return 1
+	case "$(json_value "$PLAN" '@.status')" in ok|partial|blocked|failed|unknown) ;; *) return 1 ;; esac
+	case "$(json_value "$PLAN" '@.strict_mode')" in true|false) ;; *) return 1 ;; esac
+	case "$(json_value "$PLAN" '@.compatibility_validated')" in true|false) ;; *) return 1 ;; esac
+}
+
+load_analysis_bundle() {
+	load_snapshot_bundle || return 1
+	analysis_pointer=$(read_pointer "$CURRENT_ANALYSIS" '^[a-f0-9]{64} [a-f0-9]{64}$') || return 1
+	analysis_generation=${analysis_pointer%% *}
+	analysis_manifest_seal=${analysis_pointer#* }
+	analysis_bundle=$ANALYSIS_ROOT/$analysis_generation
+	safe_private_directory "$analysis_bundle" || return 1
+	BUNDLE_MANIFEST=$analysis_bundle/luci-evidence-bundle-v1.json
+	BUNDLE_SNAPSHOT=$analysis_bundle/system-snapshot-v1.json
+	PLAN=$analysis_bundle/migration-plan-v1.json
+	REPORT=$analysis_bundle/migration-report.md
+	safe_regular_file "$BUNDLE_MANIFEST" "$MAX_MANIFEST_BYTES" || return 1
+	[ "$(file_sha256 "$BUNDLE_MANIFEST")" = "$analysis_manifest_seal" ] || return 1
+	safe_regular_file "$BUNDLE_SNAPSHOT" "$MAX_SNAPSHOT_BYTES" || return 1
+	safe_regular_file "$PLAN" "$MAX_PLAN_BYTES" || return 1
+	safe_regular_file "$REPORT" "$MAX_REPORT_BYTES" || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.schema_version')" = 1.0.0 ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.digest')" = "$analysis_generation" ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.bundle_id')" = "urn:sha256:$analysis_generation" ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.producer.name')" = smart-upgrade-migration-plan ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.producer.version')" = 1 ] || return 1
+	printf '%s\n' "$(json_value "$BUNDLE_MANIFEST" '@.producer.commit')" | grep -Eq '^[a-f0-9]{40}$' || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.validation.snapshot_schema')" = passed ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.validation.plan_schema')" = passed ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.validation.plan_canonical_digest')" = passed ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.safety.dispatch_allowed')" = false ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.safety.flash_ready')" = false ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.snapshot.filename')" = system-snapshot-v1.json ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.snapshot.schema_version')" = 1.0.0 ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.snapshot.privacy_mode')" = redacted ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.plan.filename')" = migration-plan-v1.json ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.plan.schema_version')" = 1.0.0 ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.plan.privacy_mode')" = redacted ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.report.filename')" = migration-report.md ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.report.format')" = markdown ] || return 1
+	[ "$(file_sha256 "$BUNDLE_SNAPSHOT")" = "$(json_value "$BUNDLE_MANIFEST" '@.snapshot.file_sha256')" ] || return 1
+	[ "$(file_sha256 "$PLAN")" = "$(json_value "$BUNDLE_MANIFEST" '@.plan.file_sha256')" ] || return 1
+	[ "$(file_sha256 "$REPORT")" = "$(json_value "$BUNDLE_MANIFEST" '@.report.file_sha256')" ] || return 1
+	[ "$(file_sha256 "$BUNDLE_SNAPSHOT")" = "$SNAPSHOT_FILE_SHA" ] || return 1
+	validate_plan || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.safety.build_allowed')" = "$(json_value "$PLAN" '@.build_allowed')" ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.safety.compatibility_validated')" = "$(json_value "$PLAN" '@.compatibility_validated')" ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.snapshot.snapshot_id')" = "$snapshot_id" ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.snapshot.evidence_digest')" = "$digest" ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.plan.plan_id')" = "$plan_id" ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.plan.canonical_digest')" = "$plan_digest" ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.binding.source_snapshot_id')" = "$snapshot_id" ] || return 1
+	[ "$(json_value "$BUNDLE_MANIFEST" '@.binding.source_snapshot_digest')" = "$digest" ] || return 1
+	[ "$plan_snapshot_id" = "$snapshot_id" ] && [ "$plan_snapshot_digest" = "$digest" ] || return 1
+	[ "$(read_pointer "$CURRENT_ANALYSIS" '^[a-f0-9]{64} [a-f0-9]{64}$')" = "$analysis_pointer" ] || return 1
+	[ "$(read_pointer "$CURRENT_SNAPSHOT" '^[a-f0-9]{64}-[0-9]+-[0-9]+ [a-f0-9]{64}$')" = "$snapshot_pointer" ] || return 1
+}
+
+emit_plan() {
+	if ! load_analysis_bundle; then emit_error EVIDENCE_UNVERIFIED "No trusted Snapshot-bound Migration Plan bundle is available"; return; fi
+	printf '{"available":true,"integrity_status":"matched","dispatch_allowed":false,"flash_ready":false,"snapshot_generation":"%s","plan":' "${snapshot_pointer%% *}"
+	cat "$PLAN"
+	printf '%s\n' '}'
+}
+
+bool_value() { case "$1" in true|1) printf 1 ;; *) printf 0 ;; esac; }
+
+add_plan_array() {
+	key=$1; expression=$2
+	array_tmp=$(mktemp "$STATE_DIR/.report-array.XXXXXX")
+	json_value "$PLAN" "$expression" > "$array_tmp"
+	json_add_array "$key"
+	while IFS= read -r item; do [ -z "$item" ] || json_add_string "" "$item"; done < "$array_tmp"
+	json_close_array
+	rm -f "$array_tmp"
+}
+
+emit_report() {
+	if ! load_analysis_bundle; then emit_error EVIDENCE_UNVERIFIED "Migration Report is unavailable because its evidence bundle is missing or invalid"; return; fi
+	report_content=$(cat "$REPORT")
+	json_init
+	json_add_boolean available 1
+	json_add_string integrity_status matched
+	json_add_string snapshot_generation "${snapshot_pointer%% *}"
+	json_add_string current_snapshot_id "$snapshot_id"
+	json_add_string snapshot_id "$plan_snapshot_id"
+	json_add_string plan_id "$plan_id"
+	json_add_string plan_status "$(json_value "$PLAN" '@.status')"
+	json_add_string target_distribution "$(json_value "$PLAN" '@.target.distribution')"
+	json_add_string target_version "$(json_value "$PLAN" '@.target.version')"
+	json_add_string target "$(json_value "$PLAN" '@.target.target')"
+	json_add_string profile "$(json_value "$PLAN" '@.target.profile')"
+	json_add_string architecture "$(json_value "$PLAN" '@.target.architecture')"
+	json_add_string package_manager "$(json_value "$PLAN" '@.target.package_manager')"
+	json_add_string compatibility "$(json_value "$PLAN" '@.target.compatibility')"
+	json_add_boolean build_allowed "$(bool_value "$(json_value "$PLAN" '@.build_allowed')")"
+	json_add_boolean dispatch_allowed 0
+	json_add_boolean flash_ready 0
+	add_plan_array blockers '@.blockers[*]'
+	add_plan_array warnings '@.warnings[*]'
+	add_plan_array errors '@.errors[*]'
+	json_add_string content "$report_content"
+	json_dump
+}
+
+# rpcd supplies a JSON object on stdin. No method accepts a client-controlled
+# path, command, package, service, timeout, process identity, or evidence result.
+if [ "$1" = scan-worker ]; then
+	initialize_state || exit 0
+	run_scan
+	exit
+fi
+cat >/dev/null
+initialize_state || exit 0
+case "${2:-}" in
+	status) emit_status ;;
+	scan) request_scan ;;
+	snapshot) emit_snapshot ;;
+	plan) emit_plan ;;
+	report) emit_report ;;
+	*) emit_error METHOD_NOT_FOUND "Unknown Smart Upgrade method" ;;
+esac

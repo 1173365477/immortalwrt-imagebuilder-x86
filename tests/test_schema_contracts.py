@@ -50,11 +50,24 @@ VALID_BUILD = {
     "artifacts": [], "blockers": [], "warnings": [], "errors": ["build failed"]
 }
 
+VALID_LUCI_BUNDLE = {
+    "schema_version": "1.0.0", "bundle_id": URN, "digest": HEX,
+    "created_at": "2026-11-24T00:00:00Z",
+    "producer": {"name": "smart-upgrade-migration-plan", "version": "1", "commit": "b" * 40},
+    "validation": {"snapshot_schema": "passed", "plan_schema": "passed", "plan_canonical_digest": "passed"},
+    "snapshot": {"filename": "system-snapshot-v1.json", "file_sha256": HEX, "schema_version": "1.0.0", "snapshot_id": URN, "evidence_digest": HEX, "privacy_mode": "redacted"},
+    "plan": {"filename": "migration-plan-v1.json", "file_sha256": HEX, "schema_version": "1.0.0", "plan_id": URN, "canonical_digest": HEX, "privacy_mode": "redacted"},
+    "report": {"filename": "migration-report.md", "file_sha256": HEX, "format": "markdown"},
+    "binding": {"source_snapshot_id": URN, "source_snapshot_digest": HEX},
+    "safety": {"build_allowed": False, "compatibility_validated": False, "dispatch_allowed": False, "flash_ready": False},
+}
+
 
 @pytest.mark.parametrize(("schema", "sample"), [
     ("system-snapshot-v1.json", VALID_SYSTEM),
     ("migration-plan-v1.json", VALID_PLAN),
     ("build-result-v1.json", VALID_BUILD),
+    ("luci-evidence-bundle-v1.json", VALID_LUCI_BUNDLE),
 ])
 def test_schema_positive_samples(schema, sample):
     validator(schema).validate(sample)
@@ -143,6 +156,7 @@ def test_successful_build_requires_artifact_and_valid_plan_link(mutation):
     ("migration-plan-v1.json", {**VALID_PLAN, "flash_ready": True}),
     ("build-result-v1.json", {**VALID_BUILD, "flash_ready": True}),
     ("build-result-v1.json", {**VALID_BUILD, "errors": []}),
+    ("luci-evidence-bundle-v1.json", {**VALID_LUCI_BUNDLE, "safety": {**VALID_LUCI_BUNDLE["safety"], "flash_ready": True}}),
 ])
 def test_schema_negative_samples(schema, sample):
     with pytest.raises(ValidationError):

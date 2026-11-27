@@ -12,6 +12,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from migration_plan import generate_plan, write_legacy_outputs
+from luci_evidence import create_bundle
 from release_utils import sha256_file
 
 
@@ -94,6 +95,13 @@ def main() -> int:
         json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     write_legacy_outputs(plan, args.output_dir)
+    create_bundle(
+        args.snapshot,
+        args.output_dir / "migration-plan-v1.json",
+        args.output_dir / "migration-report.md",
+        args.output_dir,
+        root,
+    )
     print(
         f"Migration plan: {plan['status']}; "
         f"build_allowed={str(plan['build_allowed']).lower()}; flash_ready=false"

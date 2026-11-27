@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -572,7 +573,7 @@ def test_apk_chroot_wrapper_rejects_commands_and_files_outside_allowlist(tmp_pat
     assert "outside allowed roots" in denied.stderr
 
 
-def test_real_apk_tools_version_comparison_when_configured(monkeypatch):
+def test_real_apk_tools_version_comparison_when_configured(monkeypatch, tmp_path):
     apk = os.environ.get("APK_REAL_BINARY")
     if not apk:
         pytest.skip("CI provides the pinned real apk-tools wrapper")
@@ -598,3 +599,34 @@ def test_real_apk_tools_version_comparison_when_configured(monkeypatch):
     assert metadata["arch"] == "x86_64"
     assert metadata["version"] == "1.0-r0"
     assert metadata["dependencies"] == ["musl"]
+    _verify_t15_in_pinned_linux_runtime(tmp_path)
+
+
+def _verify_t15_in_pinned_linux_runtime(tmp_path):
+    # The existing APK integration job has already checksum-verified this rootfs.
+    root = Path(os.environ["APK_CHROOT_ROOT"])
+    loader, binary = root / "lib/ld-musl-x86_64.so.1", root / "bin/busybox"
+    busybox = shlex.join([str(loader), str(binary)])
+    wrapper = tmp_path / "busybox-setsid"
+    wrapper.write_text(f'#!/bin/sh\nexec {busybox} setsid "$@"\n', encoding="utf-8")
+    wrapper.chmod(0o700)
+    flock = shutil.which("flock")
+    assert flock, "Linux test runner must provide flock"
+    env = dict(os.environ, T15_RPC_SHELL=f"{busybox} ash", T15_SETSID=str(wrapper),
+               T15_FLOCK=flock)
+    command = [sys.executable, "-m", "pytest", "-q", "tests/test_luci_smart_upgrade.py"]
+    subprocess.run(
+        [*command, "-k", "overall_timeout or term_during or supervisor_unavailable or rpcd_early_timeout"],
+        cwd=ROOT, env=env, check=True, timeout=90,
+    )
+    concurrency = (
+        "concurrent_first_state or concurrent_acquisition or acquisition_mutex_released or "
+        "simultaneous_scan or continues_across_expired_corrupt or lock_registry_keeps_waiters or "
+        "concurrent_workers_cannot_claim or sqlite_lock_wait_expiry_prevents"
+    )
+    for round_number in range(1, 6):
+        print(f"Concurrency round {round_number}", flush=True)
+        subprocess.run(
+            [*command, "tests/test_gateway_t14b.py", "-k", concurrency],
+            cwd=ROOT, env=env, check=True, timeout=90,
+        )

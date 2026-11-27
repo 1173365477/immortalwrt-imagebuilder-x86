@@ -41,6 +41,7 @@ def test_ci_runs_actionlint_and_all_scanner_shellcheck_targets():
     assert "compileall -q gateway scripts" in text
     assert "Gateway security" in text
     assert "scripts/smart-upgrade-agent.sh scripts/smart-upgrade-storage.sh" in text
+    assert "luci-app-smart-upgrade/root/usr/libexec/rpcd/smart_upgrade" in text
     assert "scripts/apk-chroot-wrapper.sh" in text
     assert "apk adbdump --format json" in text
     assert "Original unmapped chroot path correctly failed" in text

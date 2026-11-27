@@ -200,12 +200,14 @@ def test_same_request_id_is_independent_for_different_devices(tmp_path):
 def test_ten_concurrent_identical_requests_create_one_task(tmp_path):
     app, store, _, token, _ = gateway(tmp_path, verifier=StaticVerifier(delay=0.15))
 
-    def submit(_):
-        with TestClient(app, base_url="https://gateway.test", raise_server_exceptions=False) as client:
+    # Model one running server. A separate lifespan per request shuts down
+    # the app's shared executors while the other requests are still active.
+    with TestClient(app, base_url="https://gateway.test", raise_server_exceptions=False) as client:
+        def submit(_):
             return client.post("/builds", json=payload(), headers=auth(token))
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
-        results = list(pool.map(submit, range(10)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+            results = list(pool.map(submit, range(10)))
     assert {result.status_code for result in results} <= {200, 201}
     assert len({result.json()["internal_task_id"] for result in results}) == 1
     assert store.task_count() == 1

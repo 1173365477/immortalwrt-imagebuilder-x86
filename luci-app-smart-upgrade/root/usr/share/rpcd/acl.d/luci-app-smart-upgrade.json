@@ -1,0 +1,15 @@
+{
+	"luci-app-smart-upgrade": {
+		"description": "View read-only Smart Upgrade evidence and start a read-only scan",
+		"read": {
+			"ubus": {
+				"smart_upgrade": [ "status", "snapshot", "plan", "report" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"smart_upgrade": [ "scan" ]
+			}
+		}
+	}
+}
